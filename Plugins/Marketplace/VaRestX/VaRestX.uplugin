@@ -1,0 +1,48 @@
+{
+	"FileVersion": 3,
+	"Version": 34,
+	"VersionName": "1.2-r2",
+	"FriendlyName": "VaRestX",
+	"Description": "Plugin that makes REST (JSON) / HTTP Request server communication exposed to blueprint and easy to use",
+	"Category": "Network",
+	"CreatedBy": "Vladimir Alyamkin, Mauro Leoci",
+	"CreatedByURL": "https://ufna.dev",
+	"DocsURL": "https://cibe.notion.site/VaRestX-Plugin-1448de17957180aca6abdf3e905315d2?pvs=4",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/AboveConstraints/VaRestX",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": false,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "VaRest",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault",
+			"PlatformAllowList": [
+				"Win64",
+				"Mac",
+				"Linux",
+				"TVOS",
+				"IOS",
+				"Android",
+				"LinuxArm64",
+				"VisionOS"
+			]
+		},
+		{
+			"Name": "VaRestEditor",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64",
+				"Mac",
+				"Linux",
+				"TVOS",
+				"IOS",
+				"Android",
+				"LinuxArm64",
+				"VisionOS"
+			]
+		}
+	]
+}

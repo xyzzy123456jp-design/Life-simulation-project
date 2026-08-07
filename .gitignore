@@ -1,0 +1,19 @@
+# UE5 auto-generated folders
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Backup/
+.vs/
+*.sln
+*.slnx
+*.vsconfig
+UpgradeLog.htm
+Automation_*.sln
+Automation_*.slnx
+
+# Editor-specific
+*.opensdf
+*.sdf
+*.opendb
+*.VC.db
