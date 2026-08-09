@@ -1,0 +1,77 @@
+8:01 でビルドが開始されました...
+1>------ ビルドのスキップ: プロジェクト: UE5, 構成: BuiltWithUnrealBuildTool Win64 ------
+1>プロジェクトはこのソリューション構成に対してビルドするように選択されていません。 
+2>------ ビルド開始: プロジェクト: LifeSimulation, 構成: Development_Editor x64 ------
+2>  Using bundled DotNet SDK version: 10.0 win-x64
+2>  Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" LifeSimulationEditor Win64 Development -Project="C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\LifeSimulation.uproject" -WaitMutex -FromMsBuild -architecture=x64
+2>  Log file: C:\Users\hueda\AppData\Local\UnrealBuildTool\Log.txt
+2>  Determining max actions to execute in parallel (8 physical cores, 16 logical cores)
+2>    Executing up to 8 processes, one per physical core
+2>  Using 'git status' to determine working set for adaptive non-unity build (C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8).
+2>  UbaServer - Listening on 0.0.0.0:1345
+2>  Invalidating makefile for LifeSimulationEditor (DefaultEngine.ini modified)
+2>  Available x64 toolchains (1):
+2>   * C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231
+2>      (Family=14.51.36231, FamilyRank=2, Version=14.51.36252, HostArchitecture=x64, ReleaseChannel=Latest, Architecture=x64)
+2>  Visual Studio compiler version 14.51.36252 is newer than latest preferred version 14.50.35717. Please use caution as this compiler has not been heavily tested
+2>  Project 'LifeSimulationEditor' depends on plugin 'RawInput' which was deprecated in 5.8 and will soon be removed. Please update your dependencies.
+2>  UHT compiled-in object format Default
+2>  Building LifeSimulationEditor...
+2>  ===== Toolchain Information =====
+2>  Using ISPC compiler (C:\Program Files\Epic Games\UE_5.8\Engine\Source\ThirdParty\Intel\ISPC\bin\Windows\ispc.exe)
+2>    Intel(r) Implicit SPMD Program Compiler (Intel(r) ISPC), 1.24.0 (build commit  @ 20250404, LLVM 18.1.2)
+2>  Using Visual Studio 14.51.36252 toolchain (C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231) and Windows 10.0.26100.0 SDK (C:\Program Files (x86)\Windows Kits\10).
+2>EXEC : warning : Visual Studio compiler 14.51.36252 is not a preferred version
+2>  [Upgrade]
+2>  [Upgrade] Using backward-compatible include order. The latest version of UE has changed the order of includes, which may require code changes. The current setting is:
+2>  [Upgrade]     IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_6
+2>  [Upgrade] Suppress this message by setting 'IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;' in LifeSimulationEditor.Target.cs.
+2>  [Upgrade] Alternatively you can set this to 'EngineIncludeOrderVersion.Latest' to always use the latest include order. This will potentially cause compile errors when integrating new versions of the engine.
+2>  [Upgrade]
+2>  [Adaptive Build] Excluded from LifeSimulation unity file: LipSyncComponent.cpp, MicTestActor.cpp, TTSComponent.cpp, WhisperTranscriberComponent.cpp
+2>  =================================
+2>  Using Unreal Build Accelerator local executor to run 6 action(s)
+2>    CPU 8 physical cores, 16 logical cores
+2>    Memory 31.17 GB physical, 33.09 GB/48.54 GB committed
+2>    UBA Storage capacity 40 GB
+2>  [1/6] Compile [x64] LipSyncComponent.cpp
+2>C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\Source\LifeSimulation\LipSyncComponent.cpp(88,22): error C2039: 'SetBoneTransformByName': 'USkeletalMeshComponent' のメンバーではありません
+2>  		FaceMeshComponent->SetBoneTransformByName(LeftEyeBoneName, FTransform(LeftEyeNeutralRotation), EBoneSpaces::LocalSpace);
+2>  		                   ^
+2>  C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\Components\SkeletalMeshComponent.h(341,7): note: 'USkeletalMeshComponent' の宣言を確認してください
+2>  class USkeletalMeshComponent : public USkinnedMeshComponent, public IInterface_CollisionDataProvider
+2>        ^
+2>C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\Source\LifeSimulation\LipSyncComponent.cpp(88,111): error C2039: 'LocalSpace': 'EBoneSpaces' のメンバーではありません
+2>  		FaceMeshComponent->SetBoneTransformByName(LeftEyeBoneName, FTransform(LeftEyeNeutralRotation), EBoneSpaces::LocalSpace);
+2>  		                                                                                                            ^
+2>  C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\Components\SkinnedMeshComponent.h(135,11): note: 'EBoneSpaces' の宣言を確認してください
+2>  namespace EBoneSpaces
+2>            ^
+2>C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\Source\LifeSimulation\LipSyncComponent.cpp(88,111): error C2065: 'LocalSpace': 定義されていない識別子です。
+2>  		FaceMeshComponent->SetBoneTransformByName(LeftEyeBoneName, FTransform(LeftEyeNeutralRotation), EBoneSpaces::LocalSpace);
+2>  		                                                                                                            ^
+2>C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\Source\LifeSimulation\LipSyncComponent.cpp(89,22): error C2039: 'SetBoneTransformByName': 'USkeletalMeshComponent' のメンバーではありません
+2>  		FaceMeshComponent->SetBoneTransformByName(RightEyeBoneName, FTransform(RightEyeNeutralRotation), EBoneSpaces::LocalSpace);
+2>  		                   ^
+2>  C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\Components\SkeletalMeshComponent.h(341,7): note: 'USkeletalMeshComponent' の宣言を確認してください
+2>  class USkeletalMeshComponent : public USkinnedMeshComponent, public IInterface_CollisionDataProvider
+2>        ^
+2>C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\Source\LifeSimulation\LipSyncComponent.cpp(89,113): error C2039: 'LocalSpace': 'EBoneSpaces' のメンバーではありません
+2>  		FaceMeshComponent->SetBoneTransformByName(RightEyeBoneName, FTransform(RightEyeNeutralRotation), EBoneSpaces::LocalSpace);
+2>  		                                                                                                              ^
+2>  C:\Program Files\Epic Games\UE_5.8\Engine\Source\Runtime\Engine\Classes\Components\SkinnedMeshComponent.h(135,11): note: 'EBoneSpaces' の宣言を確認してください
+2>  namespace EBoneSpaces
+2>            ^
+2>C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\Source\LifeSimulation\LipSyncComponent.cpp(89,113): error C2065: 'LocalSpace': 定義されていない識別子です。
+2>  		FaceMeshComponent->SetBoneTransformByName(RightEyeBoneName, FTransform(RightEyeNeutralRotation), EBoneSpaces::LocalSpace);
+2>  		                                                                                                              ^
+2>  [2/6] Compile [x64] Module.LifeSimulation.gen.cpp
+2>  [3/6] Compile [x64] MicTestActor.cpp
+2>  Total time in Unreal Build Accelerator local executor: 5.89 seconds
+2>
+2>  Result: Failed (OtherCompilationError)
+2>  Total execution time: 10.12 seconds
+2>  Trace written to file C:\Users\hueda\AppData\Local\UnrealBuildTool\Trace.uba with size 9.2kb
+2>C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VC\v180\Microsoft.MakeFile.Targets(44,5): error MSB3073: コマンド ""C:\Program Files\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" LifeSimulationEditor Win64 Development -Project="C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\LifeSimulation.uproject" -WaitMutex -FromMsBuild -architecture=x64" はコード 6 で終了しました。
+========== ビルド: 成功 0、失敗 1、最新の状態 0、スキップ 1 ==========
+=========== ビルド は 8:01 で完了し、10.428 秒 掛かりました ==========

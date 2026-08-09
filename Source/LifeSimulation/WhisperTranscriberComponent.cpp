@@ -26,10 +26,10 @@ void UWhisperTranscriberComponent::TranscribeFromMicRecorder(UMicRecorderCompone
 		return;
 	}
 
-	SendWavBytesToWhisper(WavBytes);
+	SendWavBytesToWhisper(WavBytes, false);
 }
 
-void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& WavBytes)
+void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& WavBytes, bool bIsRetry)
 {
 	if (ApiKey.IsEmpty())
 	{
@@ -37,6 +37,9 @@ void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& Wa
 		OnTranscriptionFailed.Broadcast(TEXT("ApiKeyが設定されていません"));
 		return;
 	}
+
+	LastRequestedWavBytes = WavBytes;
+	bLastRequestWasRetry = bIsRetry;
 
 	// multipart/form-dataのボディを手動で構築する(UE5のHTTPモジュールに専用APIがないため)
 	TArray<uint8> RequestBody;
@@ -97,6 +100,28 @@ void UWhisperTranscriberComponent::OnWhisperResponseReceived(FHttpRequestPtr Req
 	if (StatusCode != 200)
 	{
 		UE_LOG(LogTemp, Error, TEXT("WhisperTranscriber: APIエラー(Status=%d): %s"), StatusCode, *ResponseBody);
+
+		// レート制限(429)で、まだリトライしていなければ、少し待ってから1回だけ再送する
+		if (StatusCode == 429 && !bLastRequestWasRetry)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("WhisperTranscriber: レート制限のため2秒後に再試行します"));
+
+			if (UWorld* World = GetWorld())
+			{
+				TArray<uint8> BytesToRetry = LastRequestedWavBytes;
+				World->GetTimerManager().SetTimer(
+					RetryTimerHandle,
+					[this, BytesToRetry]()
+					{
+						SendWavBytesToWhisper(BytesToRetry, true);
+					},
+					2.0f,
+					false
+				);
+				return;
+			}
+		}
+
 		OnTranscriptionFailed.Broadcast(FString::Printf(TEXT("Whisper APIエラー(Status=%d)"), StatusCode));
 		return;
 	}

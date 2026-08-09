@@ -7,7 +7,9 @@
 class UMicRecorderComponent;
 class UWhisperTranscriberComponent;
 class UTTSComponent;
+class ULipSyncComponent;
 class AChatManager;
+class ACameraActor;
 
 /**
  * MicRecorderComponentの動作確認用テストActor。
@@ -25,6 +27,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaTime) override;
 
 private:
 	UPROPERTY(VisibleAnywhere, Category = "MicTest")
@@ -36,9 +39,25 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "MicTest")
 	UTTSComponent* TTS;
 
+	UPROPERTY(VisibleAnywhere, Category = "MicTest")
+	ULipSyncComponent* LipSync;
+
 	// レベルに配置済みのChatManager(BP_ChatManager等)を詳細パネルからドラッグして設定する
 	UPROPERTY(EditAnywhere, Category = "MicTest")
 	AChatManager* ChatManager;
+
+	// AIキャラクター本体(MetaHumanのアクター)。LipSyncと起動時の向き調整の両方に使う
+	UPROPERTY(EditAnywhere, Category = "MicTest")
+	AActor* CharacterActor;
+
+	// 起動時に視点を切り替える「顔アップ」用のカメラ(レベルにCameraActorを配置して設定)
+	UPROPERTY(EditAnywhere, Category = "MicTest")
+	ACameraActor* IntroFaceCamera;
+
+	// MetaHumanのメッシュ前方向とActor本体の前方向がズレている場合の補正角度(度)。
+	// 90, -90, 180などを試して、実際に正面を向く値を見つけて設定する。
+	UPROPERTY(EditAnywhere, Category = "MicTest")
+	float FacingYawOffset = 0.0f;
 
 	// OpenAIのAPIキー。詳細パネルから設定すること(コード直書き・Git管理下は避ける)
 	UPROPERTY(EditAnywhere, Category = "MicTest")
@@ -72,6 +91,8 @@ private:
 	UPROPERTY(EditAnywhere, Category = "MicTest")
 	float NextTurnDelaySeconds = 1.0f;
 
+	// 【割り込み機能】AIが喋っている間にスペースキーを押すと、その場で発話を止めて聞き取りに切り替える(自動音量検知はオフ)
+
 	// 保存先のWAVファイルパス(デバッグ確認用。Whisper送信自体はメモリ上のデータを使う)
 	UPROPERTY(EditAnywhere, Category = "MicTest")
 	FString OutputWavPath = TEXT("C:/Temp/mic_test.wav");
@@ -83,9 +104,14 @@ private:
 	float SilenceElapsedSeconds = 0.0f;
 	float RecordingElapsedSeconds = 0.0f;
 
+	// ボトルネック計測用: 録音停止時刻からの経過時間をログに出す
+	double TurnStartTimeSeconds = 0.0;
+
 	void HandleStartRecording();
 	void CheckRecordingProgress();
 	void HandleStopRecording();
+	void HandleInterruptKeyPressed();
+	void BeginListeningAfterBargeInOrPlayback();
 
 	UFUNCTION()
 	void HandleTranscriptionComplete(const FString& TranscribedText);
@@ -95,6 +121,9 @@ private:
 
 	UFUNCTION()
 	void HandleChatResponseReceived(const FString& ResponseText);
+
+	UFUNCTION()
+	void HandleTTSPlaybackStarted();
 
 	UFUNCTION()
 	void HandleTTSPlaybackFinished();

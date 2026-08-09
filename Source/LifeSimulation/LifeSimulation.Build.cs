@@ -8,7 +8,7 @@ public class LifeSimulation : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "HTTP", "Json", "AudioCaptureCore" });
+        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "HTTP", "Json", "AudioCaptureCore", "WebSockets", "LiveLinkInterface", "LiveLink", "HeadMountedDisplay", "EnhancedInput", "ChaosVehicles" });
 
         PrivateDependencyModuleNames.AddRange(new string[] { });
 

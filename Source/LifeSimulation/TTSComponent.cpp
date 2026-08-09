@@ -1,5 +1,6 @@
 #include "TTSComponent.h"
 #include "Sound/SoundWaveProcedural.h"
+#include "Components/AudioComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Json.h"
 
@@ -103,9 +104,32 @@ void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpRespo
 	SoundWave->Duration = DurationSeconds;
 	SoundWave->QueueAudio(PcmBytes.GetData(), PcmBytes.Num());
 
+	// リップシンク用: 一定間隔(EnvelopeStepSeconds)ごとのRMS音量をあらかじめ計算しておく
+	AmplitudeEnvelope.Reset();
+	{
+		const int32 SamplesPerStep = FMath::Max(1, FMath::RoundToInt(EnvelopeStepSeconds * TTSSampleRate));
+		const int32 NumSamples = PcmBytes.Num() / sizeof(int16);
+		const int16* SamplesPtr = reinterpret_cast<const int16*>(PcmBytes.GetData());
+
+		for (int32 i = 0; i < NumSamples; i += SamplesPerStep)
+		{
+			const int32 EndIndex = FMath::Min(i + SamplesPerStep, NumSamples);
+			double SumOfSquares = 0.0;
+			for (int32 j = i; j < EndIndex; ++j)
+			{
+				const float NormalizedSample = SamplesPtr[j] / 32768.0f;
+				SumOfSquares += static_cast<double>(NormalizedSample) * NormalizedSample;
+			}
+			const float Rms = static_cast<float>(FMath::Sqrt(SumOfSquares / FMath::Max(1, EndIndex - i)));
+			// 経験的に0.3程度を「口を大きく開ける」音量の目安として正規化(LipSyncComponent側でも倍率調整可能)
+			AmplitudeEnvelope.Add(FMath::Clamp(Rms / 0.3f, 0.0f, 1.0f));
+		}
+	}
+	PlaybackStartTimeSeconds = FPlatformTime::Seconds();
+
 	// 毎回新しい一時的なAudioComponentを生成して再生する。
 	// 使い回すと内部状態が壊れて再生できなくなることがあるための対策。
-	UGameplayStatics::SpawnSound2D(this, SoundWave);
+	CurrentAudioComponent = UGameplayStatics::SpawnSound2D(this, SoundWave);
 
 	UE_LOG(LogTemp, Log, TEXT("TTS: 音声再生を開始しました(%d bytes, %.2f秒)"), PcmBytes.Num(), DurationSeconds);
 	OnPlaybackStarted.Broadcast();
@@ -123,4 +147,38 @@ void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpRespo
 			false
 		);
 	}
+}
+
+bool UTTSComponent::IsPlaying() const
+{
+	return CurrentAudioComponent != nullptr && CurrentAudioComponent->IsPlaying();
+}
+
+float UTTSComponent::GetCurrentAmplitude() const
+{
+	if (!IsPlaying() || AmplitudeEnvelope.Num() == 0)
+	{
+		return 0.0f;
+	}
+
+	const double Elapsed = FPlatformTime::Seconds() - PlaybackStartTimeSeconds;
+	const int32 Index = FMath::Clamp(FMath::FloorToInt(Elapsed / EnvelopeStepSeconds), 0, AmplitudeEnvelope.Num() - 1);
+	return AmplitudeEnvelope[Index];
+}
+
+void UTTSComponent::StopPlayback()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(PlaybackFinishedTimerHandle);
+	}
+
+	if (CurrentAudioComponent && CurrentAudioComponent->IsPlaying())
+	{
+		CurrentAudioComponent->Stop();
+		UE_LOG(LogTemp, Log, TEXT("TTS: 割り込みにより再生を停止しました"));
+	}
+
+	CurrentAudioComponent = nullptr;
+	// 意図的な停止なのでOnPlaybackFinishedは発火させない(呼び出し側が状況を把握しているため)
 }

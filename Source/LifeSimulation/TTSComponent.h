@@ -52,6 +52,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TTS")
 	void SpeakText(const FString& Text);
 
+	// 再生中の音声を即座に停止する(ユーザーの割り込み発話を検知した時などに使う)。
+	// これで止めた場合、OnPlaybackFinishedは発火しない(呼び出し側が状況を把握しているため)。
+	UFUNCTION(BlueprintCallable, Category = "TTS")
+	void StopPlayback();
+
+	UFUNCTION(BlueprintCallable, Category = "TTS")
+	bool IsPlaying() const;
+
+	// 現在再生中の音量(振幅)を0.0〜1.0で取得する。リップシンクなどに使う。
+	// 再生していない時は0を返す。
+	UFUNCTION(BlueprintCallable, Category = "TTS")
+	float GetCurrentAmplitude() const;
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -62,11 +75,19 @@ private:
 	UFUNCTION()
 	void HandleAudioFinished();
 
+	UPROPERTY()
+	UAudioComponent* CurrentAudioComponent;
+
 	FTimerHandle PlaybackFinishedTimerHandle;
 
 	// 直近のリクエストがリトライかどうか(失敗時に1回だけ再送するため)
 	bool bLastRequestWasRetry = false;
 	FString LastRequestedText;
+
+	// 再生中の音量をリップシンク用に一定間隔でサンプリングしたもの(0.0〜1.0)
+	TArray<float> AmplitudeEnvelope;
+	double PlaybackStartTimeSeconds = 0.0;
+	static constexpr float EnvelopeStepSeconds = 0.05f;
 
 	// OpenAI TTSのPCM出力は24kHz固定
 	static constexpr int32 TTSSampleRate = 24000;

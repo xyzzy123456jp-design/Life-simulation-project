@@ -44,8 +44,13 @@ public:
 	void TranscribeFromMicRecorder(UMicRecorderComponent* MicRecorder);
 
 private:
-	void SendWavBytesToWhisper(const TArray<uint8>& WavBytes);
+	void SendWavBytesToWhisper(const TArray<uint8>& WavBytes, bool bIsRetry);
 	void OnWhisperResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
 
 	FString Boundary;
+
+	// 429(レート制限)エラー時、少し待ってから1回だけ再試行するための状態
+	bool bLastRequestWasRetry = false;
+	TArray<uint8> LastRequestedWavBytes;
+	FTimerHandle RetryTimerHandle;
 };
