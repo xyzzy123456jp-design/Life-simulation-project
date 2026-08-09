@@ -11,3 +11,5 @@ U/O: 下/上
 [ / ]: VRの目の高さ
 
 & "C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe" "C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\LifeSimulation.uproject" -dx11 -game -vr -log -execcmds="r.ScreenPercentage 30"
+
+& "C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe" "C:\Users\hueda\Documents\Unreal Projects\LifeSimulation 5.8\LifeSimulation.uproject" -dx11 -game -vr -log -execcmds="r.ScreenPercentage 30, vr.MirrorMode 4"
