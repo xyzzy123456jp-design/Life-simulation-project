@@ -90,6 +90,10 @@ void ARealtimeTestActor::BeginPlay()
 		InputComponent->BindKey(EKeys::Y, IE_Pressed, this, &ARealtimeTestActor::HandleInterruptKeyPressed);
 		InputComponent->BindKey(EKeys::H, IE_Pressed, this, &ARealtimeTestActor::HandleToggleSceneModeKeyPressed);
 
+		// 【Xboxコントローラー】Yボタンで部屋⇔車切り替え、Bボタンで会話割り込み
+		InputComponent->BindKey(EKeys::Gamepad_FaceButton_Top, IE_Pressed, this, &ARealtimeTestActor::HandleToggleSceneModeKeyPressed);
+		InputComponent->BindKey(EKeys::Gamepad_FaceButton_Right, IE_Pressed, this, &ARealtimeTestActor::HandleInterruptKeyPressed);
+
 		// 【調整用】I/K/J/L(前後左右)+U/O(下/上)でコックピットカメラの位置を1回押しごとに調整
 		// (矢印キー・テンキーはXboxコントローラーやNumLock状態と干渉するため使わない)
 		InputComponent->BindKey(EKeys::I, IE_Pressed, this, &ARealtimeTestActor::HandleCockpitNudgeForward);
@@ -558,8 +562,8 @@ void ARealtimeTestActor::NudgeCockpitCamera(const FVector& LocalDelta)
 
 namespace
 {
-	constexpr float CockpitCameraNudgeStepCm = 20.0f;
-	constexpr float VREyeHeightNudgeStepCm = 15.0f;
+	constexpr float CockpitCameraNudgeStepCm = 20.0f / 6.0f; // 約3.33cm
+	constexpr float VREyeHeightNudgeStepCm = 15.0f / 6.0f; // 2.5cm
 }
 
 void ARealtimeTestActor::HandleCockpitNudgeForward()
