@@ -21,6 +21,7 @@ UE5 + MetaHuman（デフォルトキャラでOK）+ ChatGPT API + OpenAI TTSを�
 ### Phase3：見た目を作り込む
 KeenTools FaceBuilderで写真から3Dメッシュを作成し、Mesh to MetaHumanでUE5に取り込む。会話の土台が固まってから着手することで、見た目の作り直しリスクを減らす。
 最初MeshyのようなWebサービスで3Dメッシュを作ったこっちがよさそう。
+サブスクした。
 https://www.meshy.ai/ja/workspace?model-tab=image-to-3d
 
 ### Phase4：演出を磨く
