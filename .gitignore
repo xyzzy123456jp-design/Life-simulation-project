@@ -1,16 +1,27 @@
-# Unreal Engine
+# Unreal Engine / UE5 auto-generated folders
 Binaries/
-DerivedDataCache/
 Intermediate/
+DerivedDataCache/
 Saved/
+Backup/
 .vs/
-*.VC.db
-*.opensdf
-*.sdf
+
+# Visual Studio / project files
 *.sln
+*.slnx
 *.suo
+*.vsconfig
 *.xcodeproj
 *.xcworkspace
+UpgradeLog.htm
+Automation_*.sln
+Automation_*.slnx
+
+# Editor-specific
+*.opensdf
+*.sdf
+*.opendb
+*.VC.db
 
 # OS
 .DS_Store
