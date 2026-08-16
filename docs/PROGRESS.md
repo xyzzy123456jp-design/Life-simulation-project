@@ -49,9 +49,10 @@
 
 ### キャラクター刷新(名前変更・口パク方式の全面見直し)
 - キャラクター名をPaytonからJennifer(内部アセット名Crimson)に変更
-- ARKit LiveLink/RigLogic経由の口パクは廃止し、Blenderでメッシュに直接jawOpenモーフターゲットを追加、歯・口腔メッシュを削除する方式に変更して口パクが正常動作するようになった
+- MetaHumanの「From Custom Mesh」でMeshyの顔(Crimson Gaze)をMetaHuman化し、標準のARKit LiveLink/RigLogic経由の口パクが正常に動作するようになった(ユーザー確認: 2026-08-17時点で稼働方式は(a) MetaHuman化された正式なリグ経由のARKit LiveLink)
 - 元メッシュが重かった(156万頂点/422MB)ためプレイ開始時に約20秒フリーズする問題があり、約39万頂点/107.7MBの軽量版に差し替えて解決
-- MetaHumanの「From Custom Mesh」でMeshyの顔をMetaHuman化し、標準のARKit LiveLink/RigLogic経由の口パクが正常に動作するようになった
+
+> **⚠️ 記録の食い違いに関する注記**: 同日付でCodex側が作成した`docs/PROGRESS_2026-08-17.md`には、これと異なる記述がある。そちらでは「UE 5.8のFinal Assemblyで`TextureGraph.dll`がクラッシュするため、完成版MetaHumanへの切り替えは保留中」「現在の口パクはMetaHuman化ではなく、Crimson Gazeメッシュに直接jawOpenモーフを追加する簡易方式」とされている。どちらが実際にプロジェクトで稼働している状態か、今後の作業前に実機で確認することを推奨する。
 
 ### 顔の差し替え完了報告(Codex作業)
 - 新しい顔をデフォルト表示、下唇の頂点調整で開口時の厚みを約30%縮小、専用の上前歯を追加
