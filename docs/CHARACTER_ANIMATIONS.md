@@ -9,6 +9,12 @@ Jennifer(旧Payton、内部アセット名Crimson)の身体・表情動作に関
 
 ## 検討中・未実装
 
+### 会話にあわせて表情を変える
+- ARKit互換のブレンドシェイプ(`mouthSmileLeft/Right`, `browDownLeft/Right`, `eyeSquintLeft/Right`など)を、`jawOpen`と同じ経路(`ARKitLiveLinkSubsystem`)で送る想定。
+- ChatGPT/Realtime APIの返答内容(テキストや感情トーン)に応じて、喜び・驚き・困惑などの表情を対応するブレンドシェイプの組み合わせに変換して適用する。
+- 単純な例: 返答に「!」が多い/ポジティブな語彙が多い → 笑顔寄りのブレンドシェイプを強める、といったルールベースの対応付けから始めるのが手軽。
+- 将来的には、応答生成時に感情ラベル(happy/sad/surprisedなど)も一緒に出力させ、それをブレンドシェイプのプリセットにマッピングする方式が精度が高い。
+
 ### 視線(目の動き)
 - ARKit標準の視線カーブ(`eyeLookUpLeft/Right`, `eyeLookDownLeft/Right`, `eyeLookInLeft/Right`, `eyeLookOutLeft/Right`)を、`jawOpen`と同じ経路(`ARKitLiveLinkSubsystem`)で送る想定。
 - プレイヤーの方向を向き続ける「Look At」的な挙動を想定。
