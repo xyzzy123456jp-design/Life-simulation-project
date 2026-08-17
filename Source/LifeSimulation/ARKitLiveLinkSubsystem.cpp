@@ -42,5 +42,8 @@ void UARKitLiveLinkSubsystem::PushJawOpen(float Value)
 	if (Source.IsValid())
 	{
 		Source->PushCurveValue(TEXT("jawOpen"), Value);
+		// ABP_MH_LiveLink(新Face用AnimBP)がDNAのコントロール名を直接期待しているため、
+		// 同じ値をCTRL_expressions.jawOpenという名前でも配信しておく
+		Source->PushCurveValue(TEXT("CTRL_expressions.jawOpen"), Value);
 	}
 }

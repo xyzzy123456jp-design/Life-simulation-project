@@ -30,11 +30,15 @@ public:
 
 	// 使用する声(alloy, echo, fable, onyx, nova, shimmer など)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TTS")
-	FString Voice = TEXT("alloy");
+	FString Voice = TEXT("coral");
 
 	// 使用するモデル
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TTS")
 	FString Model = TEXT("tts-1");
+
+	// 再生音量の倍率(声が小さいと感じる場合はここを上げる。1.0が等倍)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TTS")
+	float PlaybackVolumeMultiplier = 2.0f;
 
 	// 再生開始時に発火
 	UPROPERTY(BlueprintAssignable, Category = "TTS")

@@ -17,6 +17,14 @@ void UTTSComponent::BeginPlay()
 void UTTSComponent::HandleAudioFinished()
 {
 	UE_LOG(LogTemp, Log, TEXT("TTS: 音声再生が終了しました"));
+	// Procedural SoundWaveは音声データを消費した後もAudioComponentが
+	// IsPlaying=trueを返す場合がある。次の録音開始を妨げないよう、終了通知の前に
+	// 明示的に停止・解放する。
+	if (CurrentAudioComponent)
+	{
+		CurrentAudioComponent->Stop();
+		CurrentAudioComponent = nullptr;
+	}
 	OnPlaybackFinished.Broadcast();
 }
 
@@ -61,7 +69,8 @@ void UTTSComponent::SendSpeechRequest(const FString& Text, bool bIsRetry)
 	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UTTSComponent::OnSpeechResponseReceived);
 	HttpRequest->ProcessRequest();
 
-	UE_LOG(LogTemp, Log, TEXT("TTS: 音声合成をリクエストしました(retry=%s): %s"), bIsRetry ? TEXT("true") : TEXT("false"), *Text);
+	UE_LOG(LogTemp, Log, TEXT("TTS: 音声合成をリクエストしました(model=%s voice=%s retry=%s): %s"),
+		*Model, *Voice, bIsRetry ? TEXT("true") : TEXT("false"), *Text);
 }
 
 void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
@@ -129,7 +138,7 @@ void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpRespo
 
 	// 毎回新しい一時的なAudioComponentを生成して再生する。
 	// 使い回すと内部状態が壊れて再生できなくなることがあるための対策。
-	CurrentAudioComponent = UGameplayStatics::SpawnSound2D(this, SoundWave);
+	CurrentAudioComponent = UGameplayStatics::SpawnSound2D(this, SoundWave, PlaybackVolumeMultiplier);
 
 	UE_LOG(LogTemp, Log, TEXT("TTS: 音声再生を開始しました(%d bytes, %.2f秒)"), PcmBytes.Num(), DurationSeconds);
 	OnPlaybackStarted.Broadcast();

@@ -50,10 +50,12 @@ void AChatManager::SendMessage(const FString& UserText)
 
 	TArray<TSharedPtr<FJsonValue>> MessagesArray;
 
-	// 返答を短く保つよう指示するシステムメッセージ
+	// Realtime方式と共通のJennifer設定を使用する。
 	TSharedPtr<FJsonObject> SystemMessageObject = MakeShareable(new FJsonObject);
 	SystemMessageObject->SetStringField(TEXT("role"), TEXT("system"));
-	SystemMessageObject->SetStringField(TEXT("content"), TEXT("You are an AI character having a voice conversation in VR. Always reply in English, in 1-2 short spoken-style sentences. Avoid long explanations or bullet points."));
+	SystemMessageObject->SetStringField(TEXT("content"), SystemInstructions.IsEmpty()
+		? TEXT("You are Jennifer. Reply naturally in English in 1-3 short spoken-style sentences.")
+		: SystemInstructions);
 	MessagesArray.Add(MakeShareable(new FJsonValueObject(SystemMessageObject)));
 
 	TSharedPtr<FJsonObject> MessageObject = MakeShareable(new FJsonObject);
