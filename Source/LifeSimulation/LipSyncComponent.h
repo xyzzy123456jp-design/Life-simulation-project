@@ -57,6 +57,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LipSync")
 	bool bShowDebugMessage = true;
 
+	// 現在のJawOpen値(0.0〜1.0)。ABP_MH_LiveLinkのSet Controlを直接呼ぶ用途などに使う
+	float GetCurrentJawOpen() const { return CurrentMorphValue; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

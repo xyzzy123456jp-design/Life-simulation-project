@@ -28,6 +28,17 @@ FARKitLiveLinkSource::FARKitLiveLinkSource(FName InSubjectName)
 	: SubjectName(InSubjectName)
 {
 	CurveNames = GStandardARKitCurveNames;
+
+	// ABP_MH_LiveLink(新しいMetaHuman Character Editorでアセンブルしたキャラクター用の
+	// AnimBP)は、ARKit名(jawOpen等)ではなくDNAのコントロール名(CTRL_expressions_*)を
+	// 直接期待しているため、jawOpenだけ両方の名前で配信しておく
+	CurveNames.Add(TEXT("CTRL_expressions.jawOpen"));
+
+	// ABP_MH_LiveLinkは、"CTRL_expressions_mouthUp"というプロパティが存在するかどうかで
+	// MHFDS(CTRL_名前提)モードかを自動判定しているため、値は使わなくても
+	// プロパティ自体は必ず配信しておき、MHFDSモードが有効になるようにする
+	CurveNames.Add(TEXT("CTRL_expressions_mouthUp"));
+
 	for (const FName& Name : CurveNames)
 	{
 		CurveValues.Add(Name, 0.0f);

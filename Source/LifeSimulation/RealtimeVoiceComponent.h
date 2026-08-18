@@ -49,7 +49,7 @@ public:
 
 	// 声(marin, cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse など)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Realtime")
-	FString Voice = TEXT("marin");
+	FString Voice = TEXT("coral");
 
 	// AIキャラクターの人格設定(旧ChatManagerのsystemメッセージに相当)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Realtime")
@@ -58,6 +58,10 @@ public:
 	// AI発話中にマイク送信をミュートするか(エコー誤検知対策)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Realtime")
 	bool bMuteMicWhileAssistantSpeaking = true;
+
+	// AIの声の再生音量の倍率(声が小さいと感じる場合はここを上げる。1.0が等倍)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Realtime")
+	float PlaybackVolumeMultiplier = 2.0f;
 
 	UPROPERTY(BlueprintAssignable, Category = "Realtime")
 	FOnRealtimeConnected OnConnected;

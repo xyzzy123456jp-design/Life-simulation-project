@@ -7,7 +7,15 @@
 class URealtimeVoiceComponent;
 class ACameraActor;
 class ULipSyncComponent;
+class UMicRecorderComponent;
+class UWhisperTranscriberComponent;
+class UTTSComponent;
+class AChatManager;
 class APawn;
+class USkeletalMesh;
+class UStaticMesh;
+class UAnimInstance;
+struct FKeyEvent;
 
 /**
  * RealtimeVoiceComponentの動作確認用テストActor。
@@ -77,8 +85,24 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SceneSwitch")
 	AActor* RoomPlayerSeat;
 
+	// Paytonの外見はここから差し替える。変更後のC++ビルドは不要。
+	UPROPERTY(EditAnywhere, Category = "Payton Appearance")
+	TObjectPtr<USkeletalMesh> PaytonFaceMesh;
+
+	// 顔を含まない髪専用Static Mesh。BP_Paytonの既存StaticMeshコンポーネントへ設定する。
+	UPROPERTY(EditAnywhere, Category = "Payton Appearance")
+	TObjectPtr<UStaticMesh> PaytonHairMesh;
+
+	UPROPERTY(EditAnywhere, Category = "Payton Appearance")
+	TSubclassOf<UAnimInstance> PaytonFaceAnimClass;
+
+	// 以前の顔+髪一体Static Meshを隠し、口が動くSkeletal Faceを表示する。
+	UPROPERTY(EditAnywhere, Category = "Payton Appearance")
+	bool bUseAnimatedPaytonFace = true;
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
 private:
@@ -88,10 +112,94 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "RealtimeTest")
 	ULipSyncComponent* LipSync;
 
+	// 通常時に使う従来の音声会話（録音 -> Whisper -> Chat -> TTS）。
+	UPROPERTY(VisibleAnywhere, Category = "LegacyVoice")
+	UMicRecorderComponent* LegacyMicRecorder;
+	UPROPERTY(VisibleAnywhere, Category = "LegacyVoice")
+	UWhisperTranscriberComponent* LegacyWhisper;
+	UPROPERTY(VisibleAnywhere, Category = "LegacyVoice")
+	UTTSComponent* LegacyTTS;
+	UPROPERTY()
+	AChatManager* LegacyChatManager = nullptr;
+
+	FTimerHandle LegacyStartRecordingTimerHandle;
+	FTimerHandle LegacyRecordingMonitorTimerHandle;
+	bool bLegacyVoiceEnabled = true;
+	bool bLegacySpeechDetected = false;
+	float LegacySilenceElapsed = 0.0f;
+	float LegacyRecordingElapsed = 0.0f;
+	void StartLegacyVoice();
+	void StopLegacyVoice();
+	void StartLegacyRecording();
+	void CheckLegacyRecording();
+	void StopAndSubmitLegacyRecording();
+	UFUNCTION() void HandleLegacyTranscriptionComplete(const FString& Text);
+	UFUNCTION() void HandleLegacyTranscriptionFailed(const FString& ErrorMessage);
+	UFUNCTION() void HandleLegacyChatResponse(const FString& Text);
+	UFUNCTION() void HandleLegacyTTSFinished();
+	UFUNCTION() void HandleLegacyTTSFailed(const FString& ErrorMessage);
+
 	void HandleInterruptKeyPressed();
+
+	// 【コスト対策】F9キーでRealtime API(音声会話)への接続/切断をトグルする
+	void HandleToggleRealtimeVoiceKeyPressed();
+
+#if WITH_EDITOR
+	void HandleSlatePreInputKeyDown(const FKeyEvent& KeyEvent);
+	FDelegateHandle SlatePreInputKeyDownHandle;
+#endif
 
 	// 【シーン切り替え】Mキーで車モード⇔部屋モードをトグルする
 	void HandleToggleSceneModeKeyPressed();
+	void HandleForceMyRoomKeyPressed();
+	void HandleForceClassroomKeyPressed();
+	void HandleForceCinemaKeyPressed();
+	void HandleForceDriveKeyPressed();
+	void HandleForceJenniferRoomKeyPressed();
+	void HandleForceWalkKeyPressed();
+	void HandleForceRestaurantKeyPressed();
+
+	// 【会話による場所移動】プレイヤーの移動提案を記憶し、Jenniferが明確に
+	// 同意した場合だけ対応する場所へ移動する。
+	enum class EConversationLocation : uint8
+	{
+		None,
+		MyRoom,
+		Classroom,
+		Cinema,
+		Drive,
+		JenniferRoom,
+		Walk,
+		Restaurant
+	};
+
+	EConversationLocation DetectProposedLocation(const FString& UserText) const;
+	bool IsJenniferAgreement(const FString& AssistantText) const;
+	bool IsExplicitRejection(const FString& AssistantText) const;
+	void TryMoveToConversationLocation(EConversationLocation Location);
+
+	// 「はい」等の同意テキストが確定した時点では、まだ音声の再生が始まっていない/残っている
+	// ことが多い。実際に喋り終わるまで一定間隔でチェックしてから、シーンを切り替える。
+	// Realtime接続中はRealtime側、従来方式ではLegacy TTS側の再生状態を見る。
+	FTimerHandle PendingLocationMoveTimerHandle;
+	EConversationLocation PendingLocationMoveTarget = EConversationLocation::None;
+	float PendingLocationMoveElapsedSeconds = 0.0f;
+	// 「喋り終わった」と判定してからの継続時間。音声チャンクの間の一瞬の途切れで
+	// 誤判定しないよう、一定時間連続で静かだった場合だけ確定する。
+	float PendingLocationMoveQuietSeconds = 0.0f;
+	void CheckPendingLocationMove();
+	bool IsCurrentVoiceStillSpeaking() const;
+	void BuildFallbackConversationScenes();
+	void BuildFallbackConversationScene(EConversationLocation Location, const FVector& Origin);
+	AActor* FindConversationSceneAnchor(EConversationLocation Location, bool bPlayerAnchor) const;
+	static FString GetConversationLocationDisplayName(EConversationLocation Location);
+	static FString GetConversationLocationTagStem(EConversationLocation Location);
+
+	EConversationLocation PendingProposedLocation = EConversationLocation::None;
+	// Jenniferがすぐに明確なYes/Noを返さず、聞き返す等した場合に何ターンまで
+	// 提案を保持しておくか(0になったら諦めて破棄する)
+	int32 PendingProposalTurnsRemaining = 0;
+	EConversationLocation CurrentConversationLocation = EConversationLocation::MyRoom;
 
 	// プレイヤー・キャラクターをVRの目の高さ補正込みで指定の位置・向きへ移動させる
 	void TeleportPlayerPawnTo(const FVector& Location, const FRotator& Rotation);
@@ -99,6 +207,79 @@ private:
 
 	// 【車モード】Paytonを車の助手席位置にアタッチする
 	void AttachCharacterToVehicle();
+
+	// 【口パク修正】PaytonのFaceメッシュを、MetaHuman Character Editorで正式に
+	// アセンブルしたSKM_Payton_FB_Character_FaceMeshに差し替え、対応するAnimClassを
+	// Face_AnimBPではなくABP_MH_LiveLinkに設定し、LiveLink購読先をLifeSimARKitFaceに
+	// 設定する。SKM_Payton_FB_Character_FaceMeshはFace_AnimBPが前提とするSkeletonと
+	// 非互換のため、専用のABP_MH_LiveLinkを使う必要がある
+	void SetupPaytonNewFace();
+
+	// 【口パク修正】ABP_MH_LiveLinkのAnimInstance(SetupPaytonNewFaceでキャッシュ)への参照。
+	// LiveLink経由のカーブ解釈に頼らず、毎フレームSet Control関数を直接呼ぶために使う
+	UPROPERTY()
+	UAnimInstance* CachedFaceAnimInstance = nullptr;
+
+	// 【口パク修正】実際にRigLogicを実行しているPost-Process AnimInstanceへの参照。
+	// メイン側のOverrideCurveValueだけでは反映されないため、こちらにも直接書き込む
+	UPROPERTY()
+	class UAnimInstance* CachedFacePostProcessInstance = nullptr;
+
+	// 【口パク修正】Face_AnimBPのJawOpenAlpha変数(Control Rigへの直接入力)への
+	// リフレクション経由の書き込みに使う
+	class FDoubleProperty* CachedJawOpenAlphaProperty = nullptr;
+
+	// 【口パク修正】JawOpenAlpha書き込み直後に強制的にアニメーションを再評価させるため、
+	// FaceのSkeletalMeshComponentをキャッシュしておく
+	UPROPERTY()
+	class USkeletalMeshComponent* CachedFaceComponent = nullptr;
+
+	// 元FBXの見た目をそのまま使い、追加したjaw骨だけを音声で動かす表示コンポーネント。
+	UPROPERTY()
+	class UPoseableMeshComponent* OriginalPaytonPoseableMesh = nullptr;
+	class USkeletalMeshComponent* OriginalPaytonMorphMesh = nullptr;
+	UPROPERTY()
+	class UStaticMeshComponent* OriginalPaytonMouthComponent = nullptr;
+	UPROPERTY()
+	class UStaticMeshComponent* OriginalPaytonUpperTeethComponent = nullptr;
+	UPROPERTY()
+	class UStaticMeshComponent* PaytonV9FaceComponent = nullptr;
+	UPROPERTY()
+	class UStaticMeshComponent* PaytonV9HairComponent = nullptr;
+	UPROPERTY()
+	class USkeletalMeshComponent* CrimsonGazeMorphComponent = nullptr;
+	UPROPERTY()
+	class UStaticMeshComponent* CrimsonGazeUpperTeethComponent = nullptr;
+
+	// 歯(Static Mesh)は口の開閉モーフに追従しないため、口の開き具合(0〜1)に応じて
+	// 疑似的に位置をずらして動いて見せるためのオフセット量(cm、口が全開の時の値)
+	UPROPERTY(EditAnywhere, Category = "Payton Appearance")
+	float CrimsonGazeTeethOpenOffsetForward = 0.3f;
+	UPROPERTY(EditAnywhere, Category = "Payton Appearance")
+	float CrimsonGazeTeethOpenOffsetDown = 0.5f;
+
+	bool bShowingPaytonV9 = false;
+	void HandleTogglePaytonV9();
+
+	FTransform OriginalPaytonJawReferenceTransform = FTransform::Identity;
+	bool bHasOriginalPaytonJawReference = false;
+	FTransform OriginalPaytonMouthCavityReferenceTransform = FTransform::Identity;
+	bool bHasOriginalPaytonMouthCavityReference = false;
+	FTransform OriginalPaytonBlinkLeftReferenceTransform = FTransform::Identity;
+	FTransform OriginalPaytonBlinkRightReferenceTransform = FTransform::Identity;
+	bool bHasOriginalPaytonBlinkBones = false;
+	float BlinkTimeUntilNext = 2.0f;
+	float BlinkElapsed = 0.0f;
+	bool bBlinkInProgress = false;
+	bool bLoggedOriginalPaytonJawFixedTest = false;
+	float OriginalPaytonJawLogCooldown = 0.0f;
+
+	// 上記AnimInstanceの「Set Control」関数への参照(毎フレームのFindFunction呼び出しを避けるため)
+	UPROPERTY()
+	class UFunction* CachedSetControlFunction = nullptr;
+
+	// CachedFaceAnimInstanceの「Set Control」関数を直接呼び出すヘルパー
+	void CallFaceSetControl(FName ControlName, float Value);
 
 	// 【車モード】車のコックピットカメラ(FrontCamera)を有効化し、後方カメラ(BackCamera)を無効化する
 	void ActivateVehicleCockpitCamera();
@@ -163,8 +344,38 @@ private:
 	// Escapeキーでゲームを終了する
 	void HandleQuitGame();
 
+	// 【診断用】Nキーで、MetaHuman Audio LiveLink SubjectのProperty名一覧をログに出す
+	void HandleDebugDumpLiveLinkSubject();
+
+	// 【診断用】Tキーで、FaceのPost-Process AnimBPの有効/無効を切り替える
+	void HandleDebugTogglePostProcess();
+
+	// 【診断用】Bキーで、BodyコンポーネントのVisibilityを切り替える
+	// (画面の顔がBody側から描画されているか確認するため)
+	void HandleDebugToggleBodyVisibility();
+
+	// 【診断用】Vキーで、FaceコンポーネントのVisibility/HiddenInGameを切り替える
+	// (今操作しているFaceが本当に画面の顔かを実測するため)
+	void HandleDebugToggleFaceVisibility();
+
+	// 【診断用】BP_Paytonに追加されているStaticMeshコンポーネントだけを切り替える
+	void HandleDebugToggleAddedStaticMeshVisibility();
+
+	// 【診断用】MetaHumanの頭髪Groomだけを個別に切り替える
+	void HandleDebugToggleHairVisibility();
+
+	/** 診断用: 実際に描画されている元FBX V2 PoseableMeshだけを表示/非表示にする */
+	void HandleDebugToggleOriginalPoseableVisibility();
+	void HandleDebugToggleOriginalPoseableRootOffset();
+	bool bDebugOriginalPoseableRootRaised = false;
+	void HandleDebugToggleOriginalPoseableJawOffset();
+	bool bDebugOriginalPoseableJawOffset = false;
+	void HandleDebugToggleOriginalPoseableJawDown();
+	bool bDebugOriginalPoseableJawDown = false;
+
 	// 現在「部屋モード」かどうか(false=車モード、初期状態)
 	bool bIsInRoomMode = false;
+	bool bInitialRoomModeApplied = false;
 
 	UFUNCTION()
 	void HandleConnected();
@@ -183,4 +394,17 @@ private:
 
 	UFUNCTION()
 	void HandleUserStartedSpeaking();
+
+	// 【記憶システム】Jenniferのキャラクター設定(名前・ボーイフレンドHiro・国籍・居住地等)と、
+	// 前回セッションの会話ログを組み合わせて、Realtime APIに渡すInstructionsを組み立てる
+	FString BuildJenniferInstructions() const;
+
+	// 今回のセッション中の会話ログ(発言のやり取りを時系列で記録し、次回セッションの記憶として使う)
+	TArray<FString> SessionTranscriptLog;
+
+	// セッション記憶の保存先ファイルパス(Saved/JenniferMemory.txt)
+	static FString GetMemoryFilePath();
+
+	// EndPlay時に今回の会話ログをファイルへ保存し、次回起動時に読み込めるようにする
+	void SaveSessionMemory();
 };

@@ -216,6 +216,13 @@ void URealtimeVoiceComponent::HandleWebSocketMessage(const FString& Message)
 	}
 	else if (EventType == TEXT("input_audio_buffer.speech_started"))
 	{
+		// response.created直後、マイクミュートが反映される前に残留音がVADへ届き、
+		// AI自身の応答を即キャンセルする競合を防ぐ。明示的な割り込みはBキーで行う。
+		if (bIsAssistantSpeaking)
+		{
+			UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: AI応答中の発話誤検知を無視しました"));
+			return;
+		}
 		UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: ユーザーの発話を検知(AI発話を中断)"));
 		StopPlaybackImmediately();
 		OnUserStartedSpeaking.Broadcast();
@@ -276,6 +283,15 @@ void URealtimeVoiceComponent::SendSessionUpdate()
 
 	TSharedRef<FJsonObject> TurnDetection = MakeShared<FJsonObject>();
 	TurnDetection->SetStringField(TEXT("type"), TEXT("server_vad"));
+	// 接続直後の環境ノイズを発話開始として掴んだままspeech_stoppedが来なくなる
+	// ケースを防ぐ。通常の会話音声は拾いつつ、常時ノイズは除外する。
+	// ローカルゲートと二重に厳しくすると小さい声や語頭を取りこぼすため緩和する。
+	// Realtime APIは小数16桁までなので、二進浮動小数点で正確な0.625を使う。
+	// 環境ノイズは下のローカルRMSゲートで引き続き除外する。
+	TurnDetection->SetNumberField(TEXT("threshold"), 0.625);
+	TurnDetection->SetNumberField(TEXT("prefix_padding_ms"), 300);
+	TurnDetection->SetNumberField(TEXT("silence_duration_ms"), 700);
+	TurnDetection->SetBoolField(TEXT("interrupt_response"), false);
 
 	TSharedRef<FJsonObject> Transcription = MakeShared<FJsonObject>();
 	Transcription->SetStringField(TEXT("model"), TEXT("gpt-4o-mini-transcribe"));
@@ -311,6 +327,7 @@ void URealtimeVoiceComponent::SendSessionUpdate()
 	Root->SetStringField(TEXT("type"), TEXT("session.update"));
 	Root->SetObjectField(TEXT("session"), Session);
 
+	UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: session voice=%s threshold=0.625 (build marker 20260817_voicecheck)"), *Voice);
 	SendJson(Root);
 	UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: session.updateを送信しました"));
 }
@@ -359,6 +376,18 @@ void URealtimeVoiceComponent::OnMicAudioCapture(const void* AudioData, int32 Num
 		return;
 	}
 
+	// WASAPI開始直後の最初のバッファはOverflowと大きなスパイクを含むことがあり、
+	// server_vadが発話開始のまま固まる原因になる。各キャプチャ開始後1秒だけ破棄する。
+	static double CaptureStartStreamTime = -1.0;
+	if (CaptureStartStreamTime < 0.0 || StreamTime < CaptureStartStreamTime)
+	{
+		CaptureStartStreamTime = StreamTime;
+	}
+	if (StreamTime - CaptureStartStreamTime < 1.0)
+	{
+		return;
+	}
+
 	// 【エコー対策】AIが喋っている間、および実際にスピーカーで再生し終わったと
 	// 推定されるまでの間は、マイクデータを送信しない。
 	// bIsAssistantSpeaking: サーバーが発話開始/終了を通知したタイミング(即時性重視)
@@ -385,6 +414,46 @@ void URealtimeVoiceComponent::OnMicAudioCapture(const void* AudioData, int32 Num
 			Sum += FloatAudioData[i * InNumChannels + c];
 		}
 		MonoSamples[i] = Sum / FMath::Max(1, InNumChannels);
+	}
+
+	// 実測で無音時RMSが0.02～0.05あり、server_vadがspeech_stoppedを返せないため、
+	// ローカルで無音ノイズだけをゼロ化する。発話末尾を切らないよう350msの保持時間を設ける。
+	double GateSumSquares = 0.0;
+	for (const float Sample : MonoSamples)
+	{
+		GateSumSquares += static_cast<double>(Sample) * static_cast<double>(Sample);
+	}
+	const double GateRms = MonoSamples.IsEmpty() ? 0.0 : FMath::Sqrt(GateSumSquares / MonoSamples.Num());
+	static double LastLocalVoiceStreamTime = -1000.0;
+	// 無音時の上限約0.05より少し上に置きつつ、従来0.065で落ちていた小声を通す。
+	if (GateRms >= 0.055)
+	{
+		LastLocalVoiceStreamTime = StreamTime;
+	}
+	else if (StreamTime - LastLocalVoiceStreamTime > 0.35)
+	{
+		for (float& Sample : MonoSamples)
+		{
+			Sample = 0.0f;
+		}
+	}
+
+	// 【診断】サーバーへ送る直前のマイク信号を1秒ごとに測る。
+	// 入力デバイスや音声変換が常時大音量になっていないかを実測するためのログ。
+	static double LastMicLevelLogTime = -1.0;
+	if (LastMicLevelLogTime < 0.0 || StreamTime - LastMicLevelLogTime >= 1.0)
+	{
+		double SumSquares = 0.0;
+		float Peak = 0.0f;
+		for (const float Sample : MonoSamples)
+		{
+			SumSquares += static_cast<double>(Sample) * static_cast<double>(Sample);
+			Peak = FMath::Max(Peak, FMath::Abs(Sample));
+		}
+		const double Rms = MonoSamples.IsEmpty() ? 0.0 : FMath::Sqrt(SumSquares / MonoSamples.Num());
+		UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: MicLevel RMS=%.6f Peak=%.6f Rate=%d Channels=%d Overflow=%s"),
+			Rms, Peak, InSampleRate, InNumChannels, bOverflow ? TEXT("true") : TEXT("false"));
+		LastMicLevelLogTime = StreamTime;
 	}
 
 	// 24kHzへダウンサンプリング(連続的な位相アキュムレータ方式で、コールバック間のズレを蓄積させない)
@@ -454,7 +523,8 @@ void URealtimeVoiceComponent::EnsurePlaybackReady()
 	PlaybackSoundWave->bLooping = false;
 	PlaybackSoundWave->Duration = INDEFINITELY_LOOPING_DURATION;
 
-	PlaybackAudioComponent = UGameplayStatics::SpawnSound2D(this, PlaybackSoundWave);
+	UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: 再生コンポーネント作成 PlaybackVolumeMultiplier=%.2f"), PlaybackVolumeMultiplier);
+	PlaybackAudioComponent = UGameplayStatics::SpawnSound2D(this, PlaybackSoundWave, PlaybackVolumeMultiplier);
 }
 
 void URealtimeVoiceComponent::QueuePlaybackAudio(const TArray<uint8>& Pcm16Bytes)

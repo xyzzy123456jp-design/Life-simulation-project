@@ -24,6 +24,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chat")
 	FString ApiKey;
 
+	// Legacy方式にもRealtime方式と同じJenniferの人物設定を渡す。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chat")
+	FString SystemInstructions;
+
 protected:
 	virtual void BeginPlay() override;
 

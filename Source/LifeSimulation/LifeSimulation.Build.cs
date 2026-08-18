@@ -8,9 +8,18 @@ public class LifeSimulation : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "HTTP", "Json", "AudioCaptureCore", "WebSockets", "LiveLinkInterface", "LiveLink", "HeadMountedDisplay", "EnhancedInput", "ChaosVehicles" });
+        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "HTTP", "Json", "AudioCaptureCore", "WebSockets", "LiveLinkInterface", "LiveLink", "LiveLinkAnimationCore", "HeadMountedDisplay", "EnhancedInput", "ChaosVehicles", "RigLogicModule" });
 
-        PrivateDependencyModuleNames.AddRange(new string[] { });
+        PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
+
+        if (Target.bBuildEditor)
+        {
+            PrivateDependencyModuleNames.AddRange(new string[]
+            {
+                "MetaHumanCharacter",
+                "MetaHumanCharacterEditor"
+            });
+        }
 
         // Uncomment if you are using Slate UI
         // PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
