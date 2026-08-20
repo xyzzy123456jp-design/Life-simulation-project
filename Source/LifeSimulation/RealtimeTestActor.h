@@ -128,6 +128,8 @@ private:
 	bool bLegacySpeechDetected = false;
 	float LegacySilenceElapsed = 0.0f;
 	float LegacyRecordingElapsed = 0.0f;
+	float LegacyVadDiagnosticElapsed = 0.0f;
+	double LegacySpeechEndTimeSeconds = 0.0;
 	void StartLegacyVoice();
 	void StopLegacyVoice();
 	void StartLegacyRecording();
@@ -136,10 +138,17 @@ private:
 	UFUNCTION() void HandleLegacyTranscriptionComplete(const FString& Text);
 	UFUNCTION() void HandleLegacyTranscriptionFailed(const FString& ErrorMessage);
 	UFUNCTION() void HandleLegacyChatResponse(const FString& Text);
+	UFUNCTION() void HandleLegacyTTSStarted();
 	UFUNCTION() void HandleLegacyTTSFinished();
 	UFUNCTION() void HandleLegacyTTSFailed(const FString& ErrorMessage);
 
 	void HandleInterruptKeyPressed();
+
+	// 【表情診断】EキーでDirect Morph表情をAPIを通さず順番に切り替える。
+	void HandleCycleExpressionKeyPressed();
+	int32 DebugExpressionCycleIndex = 0;
+	void HandleCycleExpressionTestKeyPressed();
+	int32 DebugExpressionTestCycleIndex = 0;
 
 	// 【コスト対策】F9キーでRealtime API(音声会話)への接続/切断をトグルする
 	void HandleToggleRealtimeVoiceKeyPressed();
@@ -265,12 +274,6 @@ private:
 	bool bHasOriginalPaytonJawReference = false;
 	FTransform OriginalPaytonMouthCavityReferenceTransform = FTransform::Identity;
 	bool bHasOriginalPaytonMouthCavityReference = false;
-	FTransform OriginalPaytonBlinkLeftReferenceTransform = FTransform::Identity;
-	FTransform OriginalPaytonBlinkRightReferenceTransform = FTransform::Identity;
-	bool bHasOriginalPaytonBlinkBones = false;
-	float BlinkTimeUntilNext = 2.0f;
-	float BlinkElapsed = 0.0f;
-	bool bBlinkInProgress = false;
 	bool bLoggedOriginalPaytonJawFixedTest = false;
 	float OriginalPaytonJawLogCooldown = 0.0f;
 

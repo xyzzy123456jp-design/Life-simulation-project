@@ -6,6 +6,12 @@
 #include "Kismet/GameplayStatics.h"
 #include "Json.h"
 #include "Misc/Base64.h"
+#include "ARKitLiveLinkSubsystem.h"
+#include "LipSyncComponent.h"
+#include "JenniferExpressionInstructions.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Async/Async.h"
 
 URealtimeVoiceComponent::URealtimeVoiceComponent()
 {
@@ -82,6 +88,9 @@ void URealtimeVoiceComponent::Connect()
 		FModuleManager::Get().LoadModule("WebSockets");
 	}
 
+	ClearPendingFunctionCallState();
+	ApplyExpression(TEXT("neutral"), 0.0f);
+
 	const FString Url = FString::Printf(TEXT("wss://api.openai.com/v1/realtime?model=%s"), *Model);
 
 	TMap<FString, FString> Headers;
@@ -113,6 +122,46 @@ void URealtimeVoiceComponent::Disconnect()
 	bDiscardIncomingAudioDeltas = false;
 	RemainingPlaybackSeconds = 0.0f;
 	AmplitudeEnvelopeQueue.Empty();
+	ClearPendingFunctionCallState();
+	bNextExpressionCallIsAiTest = false;
+	PendingTextExpressionTestRequests = 0;
+}
+
+bool URealtimeVoiceComponent::SendTextMessage(const FString& Text)
+{
+	if (!WebSocket.IsValid() || !WebSocket->IsConnected() || Text.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: input_textを送信できません(未接続または空文字)"));
+		return false;
+	}
+
+	TSharedRef<FJsonObject> ContentPart = MakeShared<FJsonObject>();
+	ContentPart->SetStringField(TEXT("type"), TEXT("input_text"));
+	ContentPart->SetStringField(TEXT("text"), Text);
+	TArray<TSharedPtr<FJsonValue>> Content;
+	Content.Add(MakeShared<FJsonValueObject>(ContentPart));
+
+	TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+	Item->SetStringField(TEXT("type"), TEXT("message"));
+	Item->SetStringField(TEXT("role"), TEXT("user"));
+	Item->SetArrayField(TEXT("content"), Content);
+
+	TSharedRef<FJsonObject> CreateItemEvent = MakeShared<FJsonObject>();
+	CreateItemEvent->SetStringField(TEXT("type"), TEXT("conversation.item.create"));
+	CreateItemEvent->SetObjectField(TEXT("item"), Item);
+	SendJson(CreateItemEvent);
+
+	if (Text.StartsWith(TEXT("Expression test"), ESearchCase::CaseSensitive))
+	{
+		++PendingTextExpressionTestRequests;
+	}
+
+	// Starts generation for this new user input. The existing response.create
+	// after function_call_output remains separately owned by
+	// TryFinalizeFunctionResponse().
+	SendResponseCreate();
+	UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: input_text送信 + initial response.create: %s"), *Text);
+	return true;
 }
 
 // ============================================================
@@ -123,6 +172,8 @@ void URealtimeVoiceComponent::HandleWebSocketConnected()
 {
 	UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: WebSocket接続成功"));
 	bIsConnected = true;
+	ClearPendingFunctionCallState();
+	ApplyExpression(TEXT("neutral"), 0.0f);
 
 	SendSessionUpdate();
 	StartMicCapture();
@@ -135,6 +186,7 @@ void URealtimeVoiceComponent::HandleWebSocketConnectionError(const FString& Erro
 {
 	UE_LOG(LogTemp, Error, TEXT("RealtimeVoice: 接続エラー: %s"), *Error);
 	bIsConnected = false;
+	ClearPendingFunctionCallState();
 	OnError.Broadcast(Error);
 }
 
@@ -145,12 +197,28 @@ void URealtimeVoiceComponent::HandleWebSocketClosed(int32 StatusCode, const FStr
 	bIsAssistantSpeaking = false;
 	RemainingPlaybackSeconds = 0.0f;
 	AmplitudeEnvelopeQueue.Empty();
+	ClearPendingFunctionCallState();
 	StopMicCapture();
 	OnDisconnected.Broadcast(Reason);
 }
 
 void URealtimeVoiceComponent::HandleWebSocketMessage(const FString& Message)
 {
+	// WebSocket実装やプラットフォーム差にかかわらず、UObject/TMap/LiveLinkへ
+	// 触る処理は必ずゲームスレッドで行う。
+	if (!IsInGameThread())
+	{
+		TWeakObjectPtr<URealtimeVoiceComponent> WeakThis(this);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Message]()
+		{
+			if (URealtimeVoiceComponent* StrongThis = WeakThis.Get())
+			{
+				StrongThis->HandleWebSocketMessage(Message);
+			}
+		});
+		return;
+	}
+
 	TSharedPtr<FJsonObject> JsonObject;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Message);
 	if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
@@ -210,6 +278,14 @@ void URealtimeVoiceComponent::HandleWebSocketMessage(const FString& Message)
 		FString Transcript;
 		if (JsonObject->TryGetStringField(TEXT("transcript"), Transcript))
 		{
+			// Speech transcription may omit or replace punctuation. Require the
+			// exact leading words and a boundary, while accepting space/:/,.
+			static const FString TestPrefix = TEXT("Expression test");
+			bNextExpressionCallIsAiTest = Transcript.StartsWith(TestPrefix, ESearchCase::CaseSensitive)
+				&& (Transcript.Len() == TestPrefix.Len()
+					|| FChar::IsWhitespace(Transcript[TestPrefix.Len()])
+					|| Transcript[TestPrefix.Len()] == TEXT(':')
+					|| Transcript[TestPrefix.Len()] == TEXT(','));
 			UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: ユーザー発言 -> %s"), *Transcript);
 			OnUserTranscript.Broadcast(Transcript);
 		}
@@ -238,6 +314,15 @@ void URealtimeVoiceComponent::HandleWebSocketMessage(const FString& Message)
 		bDiscardIncomingAudioDeltas = false;
 
 		OnAssistantStartedSpeaking.Broadcast();
+	}
+	else if (EventType == TEXT("response.function_call_arguments.done"))
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[EXPRESSION] Function Call event raw: %s"), *Message);
+		HandleFunctionCallArgumentsDone(JsonObject);
+	}
+	else if (EventType == TEXT("response.done"))
+	{
+		HandleResponseDoneForFunctionCalls(JsonObject);
 	}
 	else if (EventType == TEXT("error"))
 	{
@@ -316,20 +401,387 @@ void URealtimeVoiceComponent::SendSessionUpdate()
 	TArray<TSharedPtr<FJsonValue>> OutputModalities;
 	OutputModalities.Add(MakeShared<FJsonValueString>(TEXT("audio")));
 
+	TSharedRef<FJsonObject> EmotionProperties = MakeShared<FJsonObject>();
+	TSharedRef<FJsonObject> EmotionProperty = MakeShared<FJsonObject>();
+	EmotionProperty->SetStringField(TEXT("type"), TEXT("string"));
+	TArray<TSharedPtr<FJsonValue>> EmotionEnum;
+	for (const TCHAR* Emotion : { TEXT("neutral"), TEXT("happy"), TEXT("surprised"), TEXT("sad"), TEXT("confused"), TEXT("embarrassed") })
+	{
+		EmotionEnum.Add(MakeShared<FJsonValueString>(Emotion));
+	}
+	EmotionProperty->SetArrayField(TEXT("enum"), EmotionEnum);
+	EmotionProperties->SetObjectField(TEXT("emotion"), EmotionProperty);
+
+	TSharedRef<FJsonObject> IntensityProperty = MakeShared<FJsonObject>();
+	IntensityProperty->SetStringField(TEXT("type"), TEXT("number"));
+	IntensityProperty->SetStringField(TEXT("description"), TEXT("0.0 (barely noticeable) to 1.0 (very strong)"));
+	EmotionProperties->SetObjectField(TEXT("intensity"), IntensityProperty);
+
+	TSharedRef<FJsonObject> Parameters = MakeShared<FJsonObject>();
+	Parameters->SetStringField(TEXT("type"), TEXT("object"));
+	Parameters->SetObjectField(TEXT("properties"), EmotionProperties);
+	TArray<TSharedPtr<FJsonValue>> RequiredParameters;
+	RequiredParameters.Add(MakeShared<FJsonValueString>(TEXT("emotion")));
+	RequiredParameters.Add(MakeShared<FJsonValueString>(TEXT("intensity")));
+	Parameters->SetArrayField(TEXT("required"), RequiredParameters);
+
+	TSharedRef<FJsonObject> ExpressEmotionTool = MakeShared<FJsonObject>();
+	ExpressEmotionTool->SetStringField(TEXT("type"), TEXT("function"));
+	ExpressEmotionTool->SetStringField(TEXT("name"), TEXT("express_emotion"));
+	ExpressEmotionTool->SetStringField(TEXT("description"),
+		TEXT("Call this whenever your emotional tone meaningfully changes, including when returning to neutral, so your facial expression matches what you say."));
+	ExpressEmotionTool->SetObjectField(TEXT("parameters"), Parameters);
+	TArray<TSharedPtr<FJsonValue>> Tools;
+	Tools.Add(MakeShared<FJsonValueObject>(ExpressEmotionTool));
+
+	const FString ExpressionInstructions = Instructions + GetJenniferExpressionInstructions() + TEXT(
+		"\n\n"
+		"When a user text input begins with \"Expression test\", this is a hidden\n"
+		"developer test command, not conversational content. Do not explain it.\n"
+		"Do not ask what it means. Do not discuss the command itself.\n\n"
+		"Immediately call express_emotion with the requested emotion and intensity.\n"
+		"After the tool call, give only a very short response (one short sentence).\n\n"
+		"Format: \"Expression test: <emotion>\" or \"Expression test: <emotion> <intensity>\"\n"
+		"- If intensity is omitted, use 0.8 (or 0.0 if emotion is \"neutral\").\n"
+		"- Valid emotions: neutral, happy, surprised, sad, confused, embarrassed.\n\n"
+		"In expression test mode, do not apply automatic expression decay. Keep the\n"
+		"requested expression until another Expression test command or an explicit\n"
+		"neutral command is received.");
+
 	TSharedRef<FJsonObject> Session = MakeShared<FJsonObject>();
 	Session->SetStringField(TEXT("type"), TEXT("realtime"));
-	Session->SetStringField(TEXT("model"), Model);
 	Session->SetArrayField(TEXT("output_modalities"), OutputModalities);
-	Session->SetStringField(TEXT("instructions"), Instructions);
+	Session->SetStringField(TEXT("instructions"), ExpressionInstructions);
 	Session->SetObjectField(TEXT("audio"), Audio);
+	Session->SetArrayField(TEXT("tools"), Tools);
+	Session->SetStringField(TEXT("tool_choice"), TEXT("auto"));
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("type"), TEXT("session.update"));
 	Root->SetObjectField(TEXT("session"), Session);
 
-	UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: session voice=%s threshold=0.625 (build marker 20260817_voicecheck)"), *Voice);
+	UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: session voice=%s tools=[express_emotion] modelは接続URLで指定"), *Voice);
 	SendJson(Root);
 	UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: session.updateを送信しました"));
+}
+
+EExpressionApplyResult URealtimeVoiceComponent::ApplyExpression(const FString& Emotion, float Intensity)
+{
+	if (!GetWorld())
+	{
+		return EExpressionApplyResult::InvalidWorld;
+	}
+	ULipSyncComponent* LipSyncComponent = GetOwner() ? GetOwner()->FindComponentByClass<ULipSyncComponent>() : nullptr;
+	if (!LipSyncComponent)
+	{
+		return EExpressionApplyResult::TargetComponentUnavailable;
+	}
+	if (!LipSyncComponent->IsKnownExpression(Emotion))
+	{
+		return EExpressionApplyResult::UnknownEmotion;
+	}
+	if (!LipSyncComponent->CanApplyExpressions())
+	{
+		return EExpressionApplyResult::TargetComponentUnavailable;
+	}
+	if (!LipSyncComponent->SetExpressionTarget(Emotion, Intensity))
+	{
+		return EExpressionApplyResult::TargetComponentUnavailable;
+	}
+	return EExpressionApplyResult::Applied;
+}
+
+FString URealtimeVoiceComponent::MakeFunctionCallCompletionKey(
+	const FString& CallId, const FString& ItemId, const FString& ResponseId, int32 OutputIndex)
+{
+	if (!CallId.IsEmpty())
+	{
+		return FString::Printf(TEXT("call:%s"), *CallId);
+	}
+	if (!ItemId.IsEmpty())
+	{
+		return FString::Printf(TEXT("item:%s"), *ItemId);
+	}
+	return FString::Printf(TEXT("response:%s:%d"), *ResponseId, OutputIndex);
+}
+
+void URealtimeVoiceComponent::HandleFunctionCallArgumentsDone(const TSharedPtr<FJsonObject>& JsonObject)
+{
+	if (!JsonObject.IsValid())
+	{
+		return;
+	}
+
+	FString FunctionName;
+	FString CallId;
+	FString ArgumentsJson;
+	FString ResponseId;
+	FString ItemId;
+	double OutputIndexNumber = 0.0;
+	JsonObject->TryGetStringField(TEXT("name"), FunctionName);
+	JsonObject->TryGetStringField(TEXT("call_id"), CallId);
+	JsonObject->TryGetStringField(TEXT("arguments"), ArgumentsJson);
+	JsonObject->TryGetStringField(TEXT("response_id"), ResponseId);
+	JsonObject->TryGetStringField(TEXT("item_id"), ItemId);
+	JsonObject->TryGetNumberField(TEXT("output_index"), OutputIndexNumber);
+	const int32 OutputIndex = static_cast<int32>(OutputIndexNumber);
+	const FString CompletionKey = MakeFunctionCallCompletionKey(CallId, ItemId, ResponseId, OutputIndex);
+
+	if (FunctionName != TEXT("express_emotion"))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EXPRESSION] 未対応Function Call: %s"), *FunctionName);
+		if (!CallId.IsEmpty())
+		{
+			SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"unsupported_function\"}"));
+		}
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
+
+	if (CallId.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EXPRESSION] エラー: call_idが空。適用とoutput送信をスキップ"));
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
+
+	TSharedPtr<FJsonObject> ArgsObject;
+	TSharedRef<TJsonReader<>> ArgsReader = TJsonReaderFactory<>::Create(ArgumentsJson);
+	if (!FJsonSerializer::Deserialize(ArgsReader, ArgsObject) || !ArgsObject.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EXPRESSION] エラー: argumentsのJSONパースに失敗"));
+		SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"parse_failed\"}"));
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
+
+	FString Emotion;
+	double IntensityNumber = 0.0;
+	if (!ArgsObject->TryGetStringField(TEXT("emotion"), Emotion)
+		|| !ArgsObject->TryGetNumberField(TEXT("intensity"), IntensityNumber))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EXPRESSION] エラー: 必須argument欠落または型不正"));
+		SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"missing_argument\"}"));
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
+
+	const float Intensity = static_cast<float>(IntensityNumber);
+	if (!FMath::IsFinite(Intensity))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EXPRESSION] エラー: intensityが非有限値"));
+		SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"invalid_intensity\"}"));
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
+
+	const float ClampedIntensity = FMath::Clamp(Intensity, 0.0f, 1.0f);
+	const bool bTextAiTestSource = PendingTextExpressionTestRequests > 0;
+	const bool bAiTestSource = bTextAiTestSource || bNextExpressionCallIsAiTest;
+	if (bTextAiTestSource)
+	{
+		--PendingTextExpressionTestRequests;
+	}
+	bNextExpressionCallIsAiTest = false;
+	const TCHAR* SourceTag = bAiTestSource ? TEXT("AI_TEST") : TEXT("AI");
+
+	FString OutputJson;
+	const EExpressionApplyResult ApplyResult = ApplyExpression(Emotion.ToLower(), ClampedIntensity);
+	switch (ApplyResult)
+	{
+	case EExpressionApplyResult::Applied:
+		OutputJson = TEXT("{\"status\":\"applied\"}");
+		break;
+	case EExpressionApplyResult::UnknownEmotion:
+		OutputJson = TEXT("{\"status\":\"error\",\"reason\":\"unknown_emotion\"}");
+		break;
+	case EExpressionApplyResult::SubsystemUnavailable:
+		OutputJson = TEXT("{\"status\":\"error\",\"reason\":\"subsystem_unavailable\"}");
+		break;
+	case EExpressionApplyResult::TargetComponentUnavailable:
+		OutputJson = TEXT("{\"status\":\"error\",\"reason\":\"target_component_unavailable\"}");
+		break;
+	case EExpressionApplyResult::InvalidWorld:
+		OutputJson = TEXT("{\"status\":\"error\",\"reason\":\"invalid_world\"}");
+		break;
+	default:
+		OutputJson = TEXT("{\"status\":\"error\",\"reason\":\"apply_failed\"}");
+		break;
+	}
+
+	const bool bApplied = ApplyResult == EExpressionApplyResult::Applied;
+	const FString SourceMessage = FString::Printf(TEXT("[EXPRESSION][%s] %s intensity=%.2f%s"),
+		SourceTag, *Emotion.ToLower(), ClampedIntensity, bApplied ? TEXT("") : TEXT(" APPLY_FAILED"));
+	UE_LOG(LogTemp, Log, TEXT("%s call_id=%s"), *SourceMessage, *CallId);
+	if (GEngine)
+	{
+		const FColor DisplayColor = bApplied
+			? (bAiTestSource ? FColor::Cyan : FColor::Yellow)
+			: FColor::Red;
+		GEngine->AddOnScreenDebugMessage(9102, 4.0f, DisplayColor, SourceMessage,
+			true, FVector2D(1.75f, 1.75f));
+	}
+
+	SendFunctionCallOutput(CallId, OutputJson);
+	MarkFunctionCallCompleted(ResponseId, CompletionKey);
+}
+
+void URealtimeVoiceComponent::HandleResponseDoneForFunctionCalls(const TSharedPtr<FJsonObject>& JsonObject)
+{
+	if (!JsonObject.IsValid())
+	{
+		return;
+	}
+
+	const TSharedPtr<FJsonObject>* ResponseObject = nullptr;
+	if (!JsonObject->TryGetObjectField(TEXT("response"), ResponseObject) || !ResponseObject || !ResponseObject->IsValid())
+	{
+		return;
+	}
+
+	FString ResponseId;
+	(*ResponseObject)->TryGetStringField(TEXT("id"), ResponseId);
+	if (ResponseId.IsEmpty())
+	{
+		return;
+	}
+	FString ResponseStatus;
+	(*ResponseObject)->TryGetStringField(TEXT("status"), ResponseStatus);
+	if (ResponseStatus != TEXT("completed"))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EXPRESSION] response.doneを破棄: response_id=%s status=%s。response.createは送信しません"),
+			*ResponseId, ResponseStatus.IsEmpty() ? TEXT("missing") : *ResponseStatus);
+		CleanupFunctionResponse(ResponseId);
+		return;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* OutputItems = nullptr;
+	if (!(*ResponseObject)->TryGetArrayField(TEXT("output"), OutputItems) || !OutputItems)
+	{
+		return;
+	}
+
+	FPendingFunctionResponse& Pending = PendingFunctionResponses.FindOrAdd(ResponseId);
+	for (int32 Index = 0; Index < OutputItems->Num(); ++Index)
+	{
+		const TSharedPtr<FJsonObject> Item = (*OutputItems)[Index].IsValid() ? (*OutputItems)[Index]->AsObject() : nullptr;
+		if (!Item.IsValid())
+		{
+			continue;
+		}
+		FString Type;
+		Item->TryGetStringField(TEXT("type"), Type);
+		if (Type != TEXT("function_call"))
+		{
+			continue;
+		}
+
+		FString CallId;
+		FString ItemId;
+		Item->TryGetStringField(TEXT("call_id"), CallId);
+		Item->TryGetStringField(TEXT("id"), ItemId);
+		const FString Key = MakeFunctionCallCompletionKey(CallId, ItemId, ResponseId, Index);
+		Pending.ExpectedCallKeys.Add(Key);
+		if (GloballyCompletedFunctionCallKeys.Contains(Key))
+		{
+			Pending.CompletedCallKeys.Add(Key);
+		}
+	}
+
+	if (Pending.ExpectedCallKeys.Num() == 0)
+	{
+		CleanupFunctionResponse(ResponseId);
+		return;
+	}
+
+	Pending.bResponseDoneReceived = true;
+	// Function CallのみのResponseではoutput_audio.doneが来ないため、ここでサーバー側の
+	// 発話中フラグを解除し、output送信後の次Responseを待つ。
+	bIsAssistantSpeaking = false;
+	UE_LOG(LogTemp, Log, TEXT("[EXPRESSION] response.done: response_id=%s calls=%d completed=%d"),
+		*ResponseId, Pending.ExpectedCallKeys.Num(), Pending.CompletedCallKeys.Num());
+	TryFinalizeFunctionResponse(ResponseId);
+}
+
+void URealtimeVoiceComponent::SendFunctionCallOutput(const FString& CallId, const FString& OutputJson)
+{
+	if (CallId.IsEmpty())
+	{
+		return;
+	}
+	TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+	Item->SetStringField(TEXT("type"), TEXT("function_call_output"));
+	Item->SetStringField(TEXT("call_id"), CallId);
+	Item->SetStringField(TEXT("output"), OutputJson);
+
+	TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
+	Event->SetStringField(TEXT("type"), TEXT("conversation.item.create"));
+	Event->SetObjectField(TEXT("item"), Item);
+	SendJson(Event);
+	UE_LOG(LogTemp, Log, TEXT("[EXPRESSION] function_call_output送信: call_id=%s output=%s"), *CallId, *OutputJson);
+}
+
+void URealtimeVoiceComponent::SendResponseCreate()
+{
+	TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
+	Event->SetStringField(TEXT("type"), TEXT("response.create"));
+	SendJson(Event);
+}
+
+void URealtimeVoiceComponent::MarkFunctionCallCompleted(const FString& ResponseId, const FString& CompletionKey)
+{
+	GloballyCompletedFunctionCallKeys.Add(CompletionKey);
+	if (!ResponseId.IsEmpty())
+	{
+		FPendingFunctionResponse& Pending = PendingFunctionResponses.FindOrAdd(ResponseId);
+		Pending.CompletedCallKeys.Add(CompletionKey);
+		TryFinalizeFunctionResponse(ResponseId);
+	}
+}
+
+void URealtimeVoiceComponent::TryFinalizeFunctionResponse(const FString& ResponseId)
+{
+	FPendingFunctionResponse* Pending = PendingFunctionResponses.Find(ResponseId);
+	if (!Pending || !Pending->bResponseDoneReceived || Pending->bResponseCreateSent
+		|| Pending->ExpectedCallKeys.Num() == 0)
+	{
+		return;
+	}
+
+	for (const FString& ExpectedKey : Pending->ExpectedCallKeys)
+	{
+		if (!Pending->CompletedCallKeys.Contains(ExpectedKey))
+		{
+			return;
+		}
+	}
+
+	Pending->bResponseCreateSent = true;
+	SendResponseCreate();
+	UE_LOG(LogTemp, Log, TEXT("[EXPRESSION] 全Function Call完了。response.create送信: response_id=%s"), *ResponseId);
+	CleanupFunctionResponse(ResponseId);
+}
+
+void URealtimeVoiceComponent::CleanupFunctionResponse(const FString& ResponseId)
+{
+	if (FPendingFunctionResponse* Pending = PendingFunctionResponses.Find(ResponseId))
+	{
+		for (const FString& Key : Pending->ExpectedCallKeys)
+		{
+			GloballyCompletedFunctionCallKeys.Remove(Key);
+		}
+		for (const FString& Key : Pending->CompletedCallKeys)
+		{
+			GloballyCompletedFunctionCallKeys.Remove(Key);
+		}
+	}
+	PendingFunctionResponses.Remove(ResponseId);
+}
+
+void URealtimeVoiceComponent::ClearPendingFunctionCallState()
+{
+	PendingFunctionResponses.Empty();
+	GloballyCompletedFunctionCallKeys.Empty();
 }
 
 // ============================================================

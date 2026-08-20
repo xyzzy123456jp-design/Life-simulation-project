@@ -34,7 +34,7 @@ public:
 
 	// 使用するモデル
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TTS")
-	FString Model = TEXT("tts-1");
+	FString Model = TEXT("gpt-4o-mini-tts");
 
 	// 再生音量の倍率(声が小さいと感じる場合はここを上げる。1.0が等倍)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TTS")
@@ -56,6 +56,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TTS")
 	void SpeakText(const FString& Text);
 
+	// Legacy会話用。AIが選んだ感情を音声生成instructionsへ反映する。
+	UFUNCTION(BlueprintCallable, Category = "TTS")
+	void SpeakTextWithEmotion(const FString& Text, const FString& Emotion, float Intensity);
+
 	// 再生中の音声を即座に停止する(ユーザーの割り込み発話を検知した時などに使う)。
 	// これで止めた場合、OnPlaybackFinishedは発火しない(呼び出し側が状況を把握しているため)。
 	UFUNCTION(BlueprintCallable, Category = "TTS")
@@ -73,7 +77,8 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
-	void SendSpeechRequest(const FString& Text, bool bIsRetry);
+	void SendSpeechRequest(const FString& Text, const FString& Emotion, float Intensity, bool bIsRetry);
+	FString BuildEmotionInstruction(const FString& Emotion, float Intensity) const;
 	void OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
 
 	UFUNCTION()
@@ -87,6 +92,9 @@ private:
 	// 直近のリクエストがリトライかどうか(失敗時に1回だけ再送するため)
 	bool bLastRequestWasRetry = false;
 	FString LastRequestedText;
+	FString LastRequestedEmotion = TEXT("neutral");
+	float LastRequestedEmotionIntensity = 0.0f;
+	double TtsRequestStartTimeSeconds = 0.0;
 
 	// 再生中の音量をリップシンク用に一定間隔でサンプリングしたもの(0.0〜1.0)
 	TArray<float> AmplitudeEnvelope;

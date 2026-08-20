@@ -27,6 +27,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Whisper")
 	FString ApiKey;
 
+	// /v1/audio/transcriptionsへ渡すSTTモデル。A/B比較時に切り替える。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Whisper")
+	FString Model = TEXT("gpt-4o-mini-transcribe");
+
 	// 認識対象言語を明示したい場合に指定(例: "ja")。空欄ならWhisperが自動判定する。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Whisper")
 	FString Language;
@@ -53,4 +57,6 @@ private:
 	bool bLastRequestWasRetry = false;
 	TArray<uint8> LastRequestedWavBytes;
 	FTimerHandle RetryTimerHandle;
+	double SttTotalStartTimeSeconds = 0.0;
+	double SttRequestStartTimeSeconds = 0.0;
 };
