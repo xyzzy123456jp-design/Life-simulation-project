@@ -218,6 +218,7 @@ void ARealtimeTestActor::BeginPlay()
 	LegacyWhisper->OnTranscriptionComplete.AddDynamic(this, &ARealtimeTestActor::HandleLegacyTranscriptionComplete);
 	LegacyWhisper->OnTranscriptionFailed.AddDynamic(this, &ARealtimeTestActor::HandleLegacyTranscriptionFailed);
 	LegacyTTS->OnPlaybackFinished.AddDynamic(this, &ARealtimeTestActor::HandleLegacyTTSFinished);
+	LegacyTTS->OnPlaybackStarted.AddDynamic(this, &ARealtimeTestActor::HandleLegacyTTSStarted);
 	LegacyTTS->OnTTSFailed.AddDynamic(this, &ARealtimeTestActor::HandleLegacyTTSFailed);
 	if (GetWorld())
 	{
@@ -226,6 +227,7 @@ void ARealtimeTestActor::BeginPlay()
 		{
 			LegacyChatManager->ApiKey = RealtimeVoice->ApiKey;
 			LegacyChatManager->SystemInstructions = RealtimeVoice->Instructions;
+			LegacyChatManager->ExpressionComponent = LipSync;
 			LegacyChatManager->OnChatResponseReceived.AddDynamic(this, &ARealtimeTestActor::HandleLegacyChatResponse);
 		}
 	}
@@ -237,7 +239,7 @@ void ARealtimeTestActor::BeginPlay()
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Voice chat: Standard mode (F9 = Realtime API)"));
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Voice chat: Standard mode (F9 = Realtime API)"), true, FVector2D(1.75f, 1.75f));
 	}
 
 	// 【車モード】車のポーンを取得してキャッシュし、Paytonを助手席にアタッチ、
@@ -270,6 +272,8 @@ void ARealtimeTestActor::BeginPlay()
 		// 普通の文字キー(Y/H)に変更する
 		InputComponent->BindKey(EKeys::Y, IE_Pressed, this, &ARealtimeTestActor::HandleInterruptKeyPressed);
 		InputComponent->BindKey(EKeys::H, IE_Pressed, this, &ARealtimeTestActor::HandleToggleSceneModeKeyPressed);
+		InputComponent->BindKey(EKeys::E, IE_Pressed, this, &ARealtimeTestActor::HandleCycleExpressionKeyPressed);
+		InputComponent->BindKey(EKeys::R, IE_Pressed, this, &ARealtimeTestActor::HandleCycleExpressionTestKeyPressed);
 
 		// 【コスト対策】F9キーでRealtime API(音声会話)への接続/切断をトグルする。
 		// 車のEnhanced Input(P/Mキーがハンドブレーキ等と衝突)やVRソフト(F1/F2を横取り)を
@@ -369,15 +373,16 @@ FString ARealtimeTestActor::GetMemoryFilePath()
 FString ARealtimeTestActor::BuildJenniferInstructions() const
 {
 	FString Instructions = TEXT(
-		"You are Jennifer, an 18-year-old Canadian high school senior living in Vancouver. "
+		"You are Jennifer, a 19-year-old Canadian college student living in Vancouver. "
 		"You are the girlfriend of the person you're talking with, whose name is Hiro. "
 		"You know these facts about yourself and remember them throughout the conversation. "
 		"Speak naturally in English, the way a real girlfriend having a voice conversation would - "
 		"usually 1-3 sentences, warm, calm, and conversational in tone. "
 		"Speak in a composed, measured manner. Avoid bubbly or excited delivery, forced cheerfulness, "
 		"excessive exclamation marks, slang, and repeatedly opening with 'Hey'. "
-		"Your student status is background information only: do not force teenage slang, an immature manner, "
-		"an exaggerated youthful style, or references to school unless they are relevant to the conversation. "
+		"Your college student status is background information only: do not force student stereotypes, "
+		"an immature manner, an exaggerated youthful style, or references to college or university life "
+		"unless they are relevant to the conversation. "
 		"Hiro may invite you to move together to his room, a classroom, a movie theater, "
 		"a drive in the car, your room, a walk, or a restaurant. Decide naturally whether "
 		"you agree. When you agree to move, state the agreement clearly (for example, "
@@ -436,7 +441,7 @@ void ARealtimeTestActor::Tick(float DeltaTime)
 		const FString StatusText = bRealtimeActive
 			? FString::Printf(TEXT("VOICE: Realtime API (Voice=%s)"), *RealtimeVoice->Voice)
 			: FString::Printf(TEXT("VOICE: Legacy (Voice=%s)"), LegacyTTS ? *LegacyTTS->Voice : TEXT("unknown"));
-		GEngine->AddOnScreenDebugMessage(9050, 0.0f, bRealtimeActive ? FColor::Green : FColor::Orange, StatusText);
+		GEngine->AddOnScreenDebugMessage(9050, 0.0f, bRealtimeActive ? FColor::Green : FColor::Orange, StatusText, true, FVector2D(1.75f, 1.75f));
 	}
 
 	// 診断用の重い処理(毎フレームのコンポーネント再取得・LOD強制・大量ログ)は
@@ -481,56 +486,6 @@ void ARealtimeTestActor::Tick(float DeltaTime)
 				!bShowingPaytonV9 && MouthOpenAlpha > 0.10f, false);
 		}
 
-		if (!bBlinkInProgress)
-		{
-			BlinkTimeUntilNext -= DeltaTime;
-			if (BlinkTimeUntilNext <= 0.0f)
-			{
-				bBlinkInProgress = true;
-				BlinkElapsed = 0.0f;
-				UE_LOG(LogTemp, Warning, TEXT("RealtimeTestActor: 瞬き開始"));
-			}
-		}
-		else
-		{
-			BlinkElapsed += DeltaTime;
-		}
-
-		// 位置確認用: 0.5秒で閉じ、1.5秒保持、0.5秒で開く。
-		float BlinkAlpha = 0.0f;
-		if (bBlinkInProgress)
-		{
-			if (BlinkElapsed < 0.50f)
-			{
-				BlinkAlpha = BlinkElapsed / 0.50f;
-			}
-			else if (BlinkElapsed < 2.00f)
-			{
-				BlinkAlpha = 1.0f;
-			}
-			else if (BlinkElapsed < 2.50f)
-			{
-				BlinkAlpha = 1.0f - (BlinkElapsed - 2.00f) / 0.50f;
-			}
-			else
-			{
-				bBlinkInProgress = false;
-				BlinkElapsed = 0.0f;
-				BlinkTimeUntilNext = FMath::FRandRange(2.2f, 5.0f);
-			}
-		}
-
-		// FaceBuilderが生成した正式なARKit眼瞼変形を、表示中のMeshy顔へ
-		// Morph Targetとして適用する。推測したまつ毛／眉頂点は動かさない。
-		OriginalPaytonMorphMesh->SetMorphTarget(TEXT("eyeBlinkLeft"), BlinkAlpha, false);
-		OriginalPaytonMorphMesh->SetMorphTarget(TEXT("eyeBlinkRight"), BlinkAlpha, false);
-		if (bBlinkInProgress && BlinkElapsed >= 0.5f && BlinkElapsed - DeltaTime < 0.5f)
-		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("RealtimeTestActor: 瞬き閉眼値 Left=%f Right=%f"),
-				OriginalPaytonMorphMesh->GetMorphTarget(TEXT("eyeBlinkLeft")),
-				OriginalPaytonMorphMesh->GetMorphTarget(TEXT("eyeBlinkRight")));
-		}
 	}
 
 	if (CrimsonGazeMorphComponent)
@@ -637,9 +592,9 @@ void ARealtimeTestActor::Tick(float DeltaTime)
 	if (GEngine && CharacterActor)
 	{
 		GEngine->AddOnScreenDebugMessage(9001, 0.0f, FColor::Magenta,
-			FString::Printf(TEXT("Payton pos: %s"), *CharacterActor->GetActorLocation().ToString()));
+			FString::Printf(TEXT("Payton pos: %s"), *CharacterActor->GetActorLocation().ToString()), true, FVector2D(1.75f, 1.75f));
 		GEngine->AddOnScreenDebugMessage(9013, 0.0f, FColor::Magenta,
-			FString::Printf(TEXT("Payton rot: %s"), *CharacterActor->GetActorRotation().ToString()));
+			FString::Printf(TEXT("Payton rot: %s"), *CharacterActor->GetActorRotation().ToString()), true, FVector2D(1.75f, 1.75f));
 	}
 
 	// 車のBlueprintが毎フレームFrontCameraの位置を上書きしてくることがあるため、
@@ -685,7 +640,72 @@ void ARealtimeTestActor::HandleInterruptKeyPressed()
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Orange, TEXT("(interrupted)"));
+		GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Orange, TEXT("(interrupted)"), true, FVector2D(1.25f, 1.25f));
+	}
+}
+
+void ARealtimeTestActor::HandleCycleExpressionKeyPressed()
+{
+	static const TArray<FString> Emotions = {
+		TEXT("happy"), TEXT("surprised"), TEXT("sad"),
+		TEXT("confused"), TEXT("embarrassed"), TEXT("neutral")
+	};
+
+	const int32 SafeIndex = DebugExpressionCycleIndex % Emotions.Num();
+	const FString& Emotion = Emotions[SafeIndex];
+	const FString PreviousEmotion = SafeIndex == 0 ? TEXT("neutral") : Emotions[SafeIndex - 1];
+	const bool bApplied = LipSync && LipSync->SetExpressionTarget(Emotion, 1.0f);
+	DebugExpressionCycleIndex = (SafeIndex + 1) % Emotions.Num();
+
+	const FString Message = bApplied
+		? FString::Printf(TEXT("[EXPRESSION][MANUAL] %s intensity=1.00 (%s -> %s)"), *Emotion, *PreviousEmotion, *Emotion)
+		: FString::Printf(TEXT("[EXPRESSION][MANUAL] %s intensity=1.00 APPLY_FAILED (Morph不足/適用先なし)"), *Emotion);
+	if (bApplied)
+	{
+		UE_LOG(LogTemp, Log, TEXT("%s"), *Message);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("%s"), *Message);
+	}
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9101, 4.0f, bApplied ? FColor::Green : FColor::Red, Message, true, FVector2D(1.75f, 1.75f));
+	}
+}
+
+void ARealtimeTestActor::HandleCycleExpressionTestKeyPressed()
+{
+	static const TArray<FString> Emotions = {
+		TEXT("happy"), TEXT("surprised"), TEXT("sad"),
+		TEXT("confused"), TEXT("embarrassed"), TEXT("neutral")
+	};
+
+	const int32 SafeIndex = DebugExpressionTestCycleIndex % Emotions.Num();
+	const FString& Emotion = Emotions[SafeIndex];
+	const float Intensity = Emotion == TEXT("neutral") ? 0.0f : 0.8f;
+	const FString TestText = FString::Printf(TEXT("Expression test: %s %.1f"), *Emotion, Intensity);
+	const bool bSent = RealtimeVoice && RealtimeVoice->SendTextMessage(TestText);
+	if (bSent)
+	{
+		DebugExpressionTestCycleIndex = (SafeIndex + 1) % Emotions.Num();
+	}
+
+	const FString Message = bSent
+		? FString::Printf(TEXT("[EXPRESSION][AI_TEST via text] \"%s\" を送信"), *TestText)
+		: FString::Printf(TEXT("[EXPRESSION][AI_TEST via text] 送信失敗 (Realtime API未接続): \"%s\""), *TestText);
+	if (bSent)
+	{
+		UE_LOG(LogTemp, Log, TEXT("%s"), *Message);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("%s"), *Message);
+	}
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9103, 4.0f, bSent ? FColor::Cyan : FColor::Red,
+			Message, true, FVector2D(1.75f, 1.75f));
 	}
 }
 
@@ -696,6 +716,9 @@ void ARealtimeTestActor::StartLegacyVoice()
 		return;
 	}
 	bLegacyVoiceEnabled = true;
+	// gpt-4o-mini-ttsはinstructionsとPCM出力を正式サポートする。
+	// Realtime音声経路には影響しないLegacy TTS専用設定。
+	LegacyTTS->Model = TEXT("gpt-4o-mini-tts");
 	LipSync->VoiceSource = nullptr;
 	LipSync->TTSSource = LegacyTTS;
 	GetWorldTimerManager().ClearTimer(LegacyStartRecordingTimerHandle);
@@ -718,34 +741,72 @@ void ARealtimeTestActor::StartLegacyRecording()
 	if (!bLegacyVoiceEnabled || !LegacyMicRecorder || LegacyTTS->IsPlaying()) return;
 	if (LegacyMicRecorder->StartRecording())
 	{
+		UE_LOG(LogTemp, Log,
+			TEXT("[VOICE][LEGACY][TIMELINE] recording_start tts_playing=%s time=%.3f"),
+			LegacyTTS->IsPlaying() ? TEXT("true") : TEXT("false"),
+			FPlatformTime::Seconds());
 		bLegacySpeechDetected = false;
 		LegacySilenceElapsed = 0.0f;
 		LegacyRecordingElapsed = 0.0f;
+		LegacyVadDiagnosticElapsed = 0.0f;
 		GetWorldTimerManager().SetTimer(LegacyRecordingMonitorTimerHandle, this,
 			&ARealtimeTestActor::CheckLegacyRecording, 0.2f, true);
-		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Green, TEXT("Listening... (Standard mode)"));
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Green, TEXT("Listening... (Standard mode)"), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
 void ARealtimeTestActor::CheckLegacyRecording()
 {
+	constexpr float MonitorIntervalSeconds = 0.2f;
+	constexpr float SilenceDurationToStopSeconds = 1.8f;
+	constexpr float MaxRecordDurationSeconds = 20.0f;
+	// 実機診断で無音0.012～0.023、通常発話0.07～0.24を確認。
+	// 旧0.25では発話を一度も検出できず、無音タイマーが開始しなかった。
+	constexpr float VoiceActivityThreshold = 0.05f;
+
 	if (!bLegacyVoiceEnabled) return;
-	LegacyRecordingElapsed += 0.2f;
-	const float Rms = LegacyMicRecorder->GetRecentRms(0.2f);
-	// この環境では無発話時にも約0.18 RMSの入力があり、旧閾値0.02では
-	// 永久に「発話中」と判定されていた。環境ノイズを超える値で判定する。
-	if (Rms >= 0.25f)
+	LegacyRecordingElapsed += MonitorIntervalSeconds;
+	LegacyVadDiagnosticElapsed += MonitorIntervalSeconds;
+	const float Rms = LegacyMicRecorder->GetRecentRms(MonitorIntervalSeconds);
+	if (Rms >= VoiceActivityThreshold)
 	{
 		bLegacySpeechDetected = true;
 		LegacySilenceElapsed = 0.0f;
 	}
 	else if (bLegacySpeechDetected)
 	{
-		LegacySilenceElapsed += 0.2f;
+		LegacySilenceElapsed += MonitorIntervalSeconds;
 	}
-	// 無音判定が環境に合わない場合でも、7秒ごとには必ずWhisperへ送る。
-	if ((bLegacySpeechDetected && LegacySilenceElapsed >= 1.0f) || LegacyRecordingElapsed >= 7.0f)
+	if (LegacyVadDiagnosticElapsed >= 0.4f)
 	{
+		LegacyVadDiagnosticElapsed = 0.0f;
+		UE_LOG(LogTemp, Log,
+			TEXT("[VOICE][LEGACY][VAD] rms=%.3f threshold=%.3f silent_for=%.1f speaking=%s speech_detected=%s elapsed=%.1f"),
+			Rms,
+			VoiceActivityThreshold,
+			LegacySilenceElapsed,
+			Rms >= VoiceActivityThreshold ? TEXT("true") : TEXT("false"),
+			bLegacySpeechDetected ? TEXT("true") : TEXT("false"),
+			LegacyRecordingElapsed);
+	}
+	// 文中の自然な間を発話終了と誤判定しないよう1.8秒待つ。
+	// 長めの発話を途中で切らないよう、安全上限も20秒まで延長する。
+	const bool bSilenceTimeout = bLegacySpeechDetected
+		&& LegacySilenceElapsed >= SilenceDurationToStopSeconds;
+	const bool bMaxDuration = LegacyRecordingElapsed >= MaxRecordDurationSeconds;
+	if (bSilenceTimeout || bMaxDuration)
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("[VOICE][LEGACY][VAD] stop reason=%s rms=%.3f silent_for=%.1f speech_detected=%s elapsed=%.1f"),
+			bSilenceTimeout ? TEXT("silence") : TEXT("max_duration"),
+			Rms,
+			LegacySilenceElapsed,
+			bLegacySpeechDetected ? TEXT("true") : TEXT("false"),
+			LegacyRecordingElapsed);
+		UE_LOG(LogTemp, Log,
+			TEXT("[VOICE][LEGACY] 録音確定 reason=%s elapsed=%.1f silence=%.1f rms=%.3f"),
+			bSilenceTimeout ? TEXT("silence") : TEXT("max_duration"),
+			LegacyRecordingElapsed, LegacySilenceElapsed, Rms);
 		GetWorldTimerManager().ClearTimer(LegacyRecordingMonitorTimerHandle);
 		StopAndSubmitLegacyRecording();
 	}
@@ -754,6 +815,10 @@ void ARealtimeTestActor::CheckLegacyRecording()
 void ARealtimeTestActor::StopAndSubmitLegacyRecording()
 {
 	LegacyMicRecorder->StopRecording();
+	LegacySpeechEndTimeSeconds = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Log,
+		TEXT("[LATENCY][LEGACY] speech_end measurement_origin=recording_stop_after_silence_confirmation silence=%.1f sec"),
+		LegacySilenceElapsed);
 	if (!bLegacyVoiceEnabled) return;
 	if (!LegacyMicRecorder->HasSignificantAudio())
 	{
@@ -782,11 +847,40 @@ void ARealtimeTestActor::HandleLegacyChatResponse(const FString& Text)
 {
 	if (!bLegacyVoiceEnabled) return;
 	HandleAssistantTranscript(Text);
-	LegacyTTS->SpeakText(Text);
+	const FString Emotion = LegacyChatManager
+		? LegacyChatManager->GetCurrentLegacyEmotion()
+		: TEXT("neutral");
+	const float EmotionIntensity = LegacyChatManager
+		? LegacyChatManager->GetCurrentLegacyEmotionIntensity()
+		: 0.0f;
+	LegacyTTS->SpeakTextWithEmotion(Text, Emotion, EmotionIntensity);
+}
+
+void ARealtimeTestActor::HandleLegacyTTSStarted()
+{
+	UE_LOG(LogTemp, Log, TEXT("[VOICE][LEGACY][TIMELINE] tts_playback_start time=%.3f"),
+		FPlatformTime::Seconds());
+	if (LegacySpeechEndTimeSeconds <= 0.0)
+	{
+		return;
+	}
+	const double LatencySeconds = FPlatformTime::Seconds() - LegacySpeechEndTimeSeconds;
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY][TOTAL] speech_end_to_playback=%.3f sec"), LatencySeconds);
+	UE_LOG(LogTemp, Log, TEXT("[EXPRESSION][LEGACY][LATENCY] user_speech_end_to_tts_start=%.3f sec"), LatencySeconds);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9105, 4.0f, FColor::Silver,
+			FString::Printf(TEXT("[LEGACY LATENCY] speech end -> TTS %.2f sec"), LatencySeconds),
+			true, FVector2D(1.75f, 1.75f));
+	}
 }
 
 void ARealtimeTestActor::HandleLegacyTTSFinished()
 {
+	UE_LOG(LogTemp, Log,
+		TEXT("[VOICE][LEGACY][TIMELINE] tts_playback_end tts_playing=%s time=%.3f"),
+		LegacyTTS && LegacyTTS->IsPlaying() ? TEXT("true") : TEXT("false"),
+		FPlatformTime::Seconds());
 	if (bLegacyVoiceEnabled) StartLegacyRecording();
 }
 
@@ -822,7 +916,7 @@ void ARealtimeTestActor::HandleToggleRealtimeVoiceKeyPressed()
 		StartLegacyVoice();
 		if (GEngine)
 		{
-			GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Orange, TEXT("VOICE: Legacy (F9 / 9 = Realtime)"));
+			GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Orange, TEXT("VOICE: Legacy (F9 / 9 = Realtime)"), true, FVector2D(1.25f, 1.25f));
 		}
 	}
 	else
@@ -833,7 +927,7 @@ void ARealtimeTestActor::HandleToggleRealtimeVoiceKeyPressed()
 		UE_LOG(LogTemp, Log, TEXT("RealtimeTestActor: [INPUT] Realtime APIへ接続します"));
 		if (GEngine)
 		{
-			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Silver, TEXT("VOICE: Connecting to Realtime API..."));
+			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Silver, TEXT("VOICE: Connecting to Realtime API..."), true, FVector2D(1.25f, 1.25f));
 		}
 		RealtimeVoice->Connect();
 	}
@@ -1332,6 +1426,12 @@ void ARealtimeTestActor::SetupPaytonNewFace()
 					CrimsonPreviewComponent->SetVisibility(true, false);
 					OriginalPaytonMorphMesh->SetVisibility(false, false);
 					if (OriginalPaytonUpperTeethComponent) OriginalPaytonUpperTeethComponent->SetVisibility(false, false);
+					// 表情制御は実際に表示しているDirect Morph顔へ向ける。
+					// 現行CrimsonにはjawOpen以外の表情Morphが無いため、登録時ログで明示する。
+					if (LipSync)
+					{
+						LipSync->SetExpressionFaceMesh(CrimsonGazeMorphComponent);
+					}
 				}
 				else
 				{
@@ -1426,17 +1526,6 @@ void ARealtimeTestActor::SetupPaytonNewFace()
 				OriginalPaytonMouthCavityReferenceTransform = OriginalPaytonPoseableMesh->GetBoneTransformByName(
 					TEXT("mouth_cavity"), EBoneSpaces::ComponentSpace);
 				bHasOriginalPaytonMouthCavityReference = MouthCavityBoneIndex != INDEX_NONE;
-				const int32 BlinkLeftBoneIndex = OriginalPaytonPoseableMesh->GetBoneIndex(TEXT("blink_l"));
-				const int32 BlinkRightBoneIndex = OriginalPaytonPoseableMesh->GetBoneIndex(TEXT("blink_r"));
-				OriginalPaytonBlinkLeftReferenceTransform = OriginalPaytonPoseableMesh->GetBoneTransformByName(
-					TEXT("blink_l"), EBoneSpaces::ComponentSpace);
-				OriginalPaytonBlinkRightReferenceTransform = OriginalPaytonPoseableMesh->GetBoneTransformByName(
-					TEXT("blink_r"), EBoneSpaces::ComponentSpace);
-				bHasOriginalPaytonBlinkBones = BlinkLeftBoneIndex != INDEX_NONE && BlinkRightBoneIndex != INDEX_NONE;
-				BlinkTimeUntilNext = FMath::FRandRange(1.0f, 2.5f);
-				UE_LOG(LogTemp, Warning, TEXT("RealtimeTestActor: 瞬きボーン初期化 Left=%d Right=%d Enabled=%s"),
-					BlinkLeftBoneIndex, BlinkRightBoneIndex,
-					bHasOriginalPaytonBlinkBones ? TEXT("true") : TEXT("false"));
 				if (OriginalPaytonMouthComponent && bHasOriginalPaytonMouthCavityReference)
 				{
 					FVector MouthLocation = OriginalPaytonMouthCavityReferenceTransform.GetTranslation();
@@ -1762,7 +1851,7 @@ void ARealtimeTestActor::NudgeCockpitCamera(const FVector& LocalDelta)
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(9002, 3.f, FColor::Green,
-			FString::Printf(TEXT("FrontCamera relative location: %s"), *DesiredFrontCameraOffset.ToString()));
+			FString::Printf(TEXT("FrontCamera relative location: %s"), *DesiredFrontCameraOffset.ToString()), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
@@ -1812,7 +1901,7 @@ void ARealtimeTestActor::AdjustVREyeHeightOffset(float DeltaCm)
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(9011, 3.f, FColor::Green,
-			FString::Printf(TEXT("VR eye height offset: %.1f"), VehicleCockpitVREyeHeightOffsetCm));
+			FString::Printf(TEXT("VR eye height offset: %.1f"), VehicleCockpitVREyeHeightOffsetCm), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
@@ -1834,7 +1923,7 @@ void ARealtimeTestActor::HandleResetVRCenter()
 		UE_LOG(LogTemp, Log, TEXT("RealtimeTestActor: VRのセンター位置をリセットしました"));
 		if (GEngine)
 		{
-			GEngine->AddOnScreenDebugMessage(9010, 2.f, FColor::Cyan, TEXT("VR center reset"));
+			GEngine->AddOnScreenDebugMessage(9010, 2.f, FColor::Cyan, TEXT("VR center reset"), true, FVector2D(1.25f, 1.25f));
 		}
 	}
 }
@@ -2405,6 +2494,10 @@ void ARealtimeTestActor::HandleTogglePaytonV9()
 	}
 	if (OriginalPaytonUpperTeethComponent) OriginalPaytonUpperTeethComponent->SetVisibility(false, false);
 	if (CrimsonGazeUpperTeethComponent) CrimsonGazeUpperTeethComponent->SetVisibility(false, false);
+	if (LipSync)
+	{
+		LipSync->SetExpressionFaceMesh(bShowingPaytonV9 ? CrimsonGazeMorphComponent : OriginalPaytonMorphMesh);
+	}
 	UE_LOG(LogTemp, Warning, TEXT("RealtimeTestActor: Payton表示を%sへ切り替えました"),
 		bShowingPaytonV9 ? TEXT("Crimson Gaze静止モデル") : TEXT("現在の口パクモデル"));
 }
@@ -2444,7 +2537,7 @@ void ARealtimeTestActor::HandleToggleSceneModeKeyPressed()
 
 		if (GEngine)
 		{
-			GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Cyan, TEXT("(Room mode)"));
+			GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Cyan, TEXT("(Room mode)"), true, FVector2D(1.25f, 1.25f));
 		}
 	}
 	else
@@ -2464,7 +2557,7 @@ void ARealtimeTestActor::HandleToggleSceneModeKeyPressed()
 
 		if (GEngine)
 		{
-			GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Cyan, TEXT("(Cockpit mode)"));
+			GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Cyan, TEXT("(Cockpit mode)"), true, FVector2D(1.25f, 1.25f));
 		}
 	}
 }
@@ -2510,7 +2603,7 @@ void ARealtimeTestActor::HandleConnected()
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Connected! Just start talking."));
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Connected! Just start talking."), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
@@ -2524,7 +2617,7 @@ void ARealtimeTestActor::HandleDisconnected(const FString& Reason)
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, FString::Printf(TEXT("Disconnected: %s"), *Reason));
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, FString::Printf(TEXT("Disconnected: %s"), *Reason), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
@@ -2539,7 +2632,7 @@ void ARealtimeTestActor::HandleError(const FString& ErrorMessage)
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Red, FString::Printf(TEXT("Error: %s"), *ErrorMessage));
+		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Red, FString::Printf(TEXT("Error: %s"), *ErrorMessage), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
@@ -2563,7 +2656,7 @@ void ARealtimeTestActor::HandleUserTranscript(const FString& Text)
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Cyan, FString::Printf(TEXT("You: %s"), *Text));
+		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Cyan, FString::Printf(TEXT("You: %s"), *Text), true, FVector2D(1.25f, 1.25f));
 	}
 }
 
@@ -2574,7 +2667,7 @@ void ARealtimeTestActor::HandleAssistantTranscript(const FString& Text)
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Yellow, FString::Printf(TEXT("AI: %s"), *Text));
+		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Yellow, FString::Printf(TEXT("AI: %s"), *Text), true, FVector2D(1.25f, 1.25f));
 	}
 
 	if (PendingProposedLocation != EConversationLocation::None)
@@ -3216,7 +3309,7 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Orange,
-				FString::Printf(TEXT("%s: scene anchors are not configured yet"), *LocationName));
+				FString::Printf(TEXT("%s: scene anchors are not configured yet"), *LocationName), true, FVector2D(1.25f, 1.25f));
 		}
 		return;
 	}
@@ -3326,7 +3419,7 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 4.f, FColor::Cyan,
-			FString::Printf(TEXT("Moved to: %s"), *GetConversationLocationDisplayName(Location)));
+			FString::Printf(TEXT("Moved to: %s"), *GetConversationLocationDisplayName(Location)), true, FVector2D(1.75f, 1.75f));
 	}
 }
 
@@ -3336,6 +3429,6 @@ void ARealtimeTestActor::HandleUserStartedSpeaking()
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Orange, TEXT("(you started talking)"));
+		GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Orange, TEXT("(you started talking)"), true, FVector2D(1.25f, 1.25f));
 	}
 }

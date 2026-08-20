@@ -6,29 +6,32 @@ Jennifer(旧Payton、内部アセット名Crimson)の身体・表情動作に関
 
 - **口パク**: MetaHumanの「From Custom Mesh」でMeshyの顔をMetaHuman化し、標準のARKit LiveLink/RigLogic経由で動作。`ARKitLiveLinkSubsystem::PushJawOpen()`経由。
 - **起動時の顔アップ**: `MicTestActor`が起動時にキャラクターをカメラの方へ`SetActorRotation`で向かせる仕組み(`AddTickPrerequisiteActor`でTick順序を明示的に固定し、他システムの上書きに打ち勝つ)。
+- **感情表情**: Realtime/Legacyの両経路から共通のDirect Morph適用先へ`neutral / happy / surprised / sad / confused / embarrassed`を適用する。
+- **自然なまばたき**: Crimsonの`eyeBlinkLeft / eyeBlinkRight`を`ULipSyncComponent`の既存Tick内で両目同期駆動する。間隔2.5～6.0秒、閉じる0.08～0.12秒、保持0.03～0.08秒、開く0.10～0.15秒。初回もランダム、DeltaTimeベース、値は0～1。表情収束・表情Backend可否、Legacy/Realtime、TTS/STT/VAD、jawOpenから独立している。
 
 ## 検討中・未実装
-
-### 会話にあわせて表情を変える
-- ARKit互換のブレンドシェイプ(`mouthSmileLeft/Right`, `browDownLeft/Right`, `eyeSquintLeft/Right`など)を、`jawOpen`と同じ経路(`ARKitLiveLinkSubsystem`)で送る想定。
-- ChatGPT/Realtime APIの返答内容(テキストや感情トーン)に応じて、喜び・驚き・困惑などの表情を対応するブレンドシェイプの組み合わせに変換して適用する。
-- 単純な例: 返答に「!」が多い/ポジティブな語彙が多い → 笑顔寄りのブレンドシェイプを強める、といったルールベースの対応付けから始めるのが手軽。
-- 将来的には、応答生成時に感情ラベル(happy/sad/surprisedなど)も一緒に出力させ、それをブレンドシェイプのプリセットにマッピングする方式が精度が高い。
 
 ### 視線(目の動き)
 - ARKit標準の視線カーブ(`eyeLookUpLeft/Right`, `eyeLookDownLeft/Right`, `eyeLookInLeft/Right`, `eyeLookOutLeft/Right`)を、`jawOpen`と同じ経路(`ARKitLiveLinkSubsystem`)で送る想定。
 - プレイヤーの方向を向き続ける「Look At」的な挙動を想定。
 
-### 自然なまばたき
-- RigLogicは`Use ARKit Face`(LiveLink外部入力モード)だと、LiveLinkから明示的に値を送らないカーブは動かない。
-- ランダムな間隔(2〜6秒程度)で`eyeBlinkLeft`/`eyeBlinkRight`を短時間(0.1〜0.2秒)だけ動かす自前実装が必要。
-- 現状`ARKitLiveLinkSubsystem`に瞬き専用のPush関数はまだ無い。今後追加予定。
+### うなずき（次回開始地点: Crimson簡易Head Rig化の設計・調査）
 
-### 頭の上下(見上げる・見下ろす)
-- 特定のイベント・会話内容に応じて、はっきり見上げる・見下ろす大きな動きを想定。
-- C++からの直接ボーン操作(`SetBoneTransformByName`)はUE5.8で使用不可と判明済み。
-- 代わりにAnimation Blueprint側に「Transform (Modify) Bone」ノードを追加し、`head`/`neck_01`ボーンに外部から角度を加算できる変数(例: `HeadLookRotation`)を用意する方式を推奨。
-- C++/イベント側からはAnimInstance経由でこの変数を書き換えるだけで済む。
+2026年8月20日の調査時点では実装しない。
+
+- MetaHuman Bodyの階層は`neck_01 → neck_02 → head`。
+- MetaHuman側には`ABP_MetaHuman_f_med_nrw_Retargeting`、`Face_AnimBP`、`Face_PostProcess_AnimBP`、`HeadMovementIK_Proc_CtrlRig`等の既存Head/Neck制御があり、追加回転の所有権競合を避ける必要がある。
+- 現在表示中のCrimsonは`root` Boneしか持たず、全頂点がrootへ100%ウェイトされている。MetaHumanのLeader Poseへ接続されていないため、MetaHumanのHead Boneを動かしても追従しない。
+- Crimson rootを回すと顔・髪だけでなく肩・胴体も回る。このため現状のままC++からHead Bone回転を追加する方法は採用しない。
+
+次回は次の順で進める。
+
+1. Crimsonへneck/head系Boneを追加する方法を検討する。
+2. 頭・顔・髪と肩・胴体のウェイト分離方法を検討する。
+3. MetaHuman側との接続方式を決定する。
+4. AnimBPまたはControl Rigによる安全な加算回転方式を決定する。
+5. AI連動なしで「下へ5～8度 → 元へ戻る」単発nodを実装・確認する。
+6. 動作確認後、Function Calling連動を別工程で検討する。
 
 ### 歩行・走行
 - MetaHuman公式サンプルアニメーション(Idle/Walk/Run)とBlend Space/State Machineの組み合わせで実現可能。

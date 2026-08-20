@@ -1,5 +1,9 @@
 # 表情制御仕様 (FACIAL_EXPRESSION_SPEC_v5.md)
 
+> - [2026-08-20 / Codex変更→反映] Legacy通常APIにも`express_emotion`を統合し、AI元intensityと顔用intensity（neutral=0、その他minimum 0.8）を分離した。さらにLegacy TTSを`gpt-4o-mini-tts`/`coral`へ更新してAI元emotion/intensityに応じた短い音声instructionsを追加した。
+>   理由: Realtimeだけでなく通常会話でも顔と声の感情を一致させつつ、顔の視認性調整が音声演技を過剰にしないようにするため。
+> - [2026-08-20 / Codex変更→反映] Crimsonへ`eyeBlinkLeft / eyeBlinkRight`を追加し、`ULipSyncComponent`の既存Tickで自然な両目同期まばたきを実装した。閉眼不足と外眼角側の変形不足もMorph生成側で調整し、UEへ再インポートした。
+>   理由: 表情・jawOpenの所有権を壊さず、会話状態に依存しない自然な瞬きを実現するため。
 > v5: (チャッピー追加) Jennifer側の顔制御確認から手動表情テスト、補間、Realtime API連携、LipSync共存、自動まばたき・視線・微細表情までの推奨実装順序(Phase1〜6)、およびセクション17.5(Face競合確認・まばたき・視線・左右非対称)を追加。
 > (Claude指摘・反映) 新しいPhase構成のチェックリストから、ステップ0.5(RealtimeVoiceComponentのアタッチ先・Instructions全文・WebSocketコールバックスレッドの確認)への参照が漏れていたため、Phase1の1番とPhase3の7番に明示的に復元。
 > - [Claude指摘→反映] `missing_argument`(必須フィールド欠落)エラーがセクション3.4のoutputカタログ・セクション11の異常系一覧・セクション17の合格条件のいずれにも載っていなかったため追加。
@@ -1168,14 +1172,11 @@ JenniferのFaceを同時に駆動する仕組みを確認する。
 
 ### 17.5.2 自動まばたき
 
-Blinkは`express_emotion`とは独立管理する。
+**2026年8月20日 実装済み。** Direct Morph顔の`eyeBlinkLeft / eyeBlinkRight`を使用し、両目を同期させる。間隔は2.5～6.0秒、閉じる時間0.08～0.12秒、閉眼保持0.03～0.08秒、開く時間0.10～0.15秒。初回待機もランダムで、進行はDeltaTimeベース、Morph値は0～1へClampする。
 
-- `eyeBlinkLeft`
-- `eyeBlinkRight`
+`TickBlink()`は`TickExpression()`および`bExpressionConverged`から独立し、blink Morphの存在確認も18個のExpression Morphを検査する`bExpressionBackendAvailable`から独立する。新しいActor Tickは追加せず`ULipSyncComponent`の既存Tickを共有する。`jawOpen`、Legacy/Realtime、TTS/STT/VADとは別所有とし、手動Expression Curve経路からblink Morphを登録することは禁止する。
 
-がJenniferで有効かを単体確認する。
-
-通常会話中のBlinkはemotion変更のたびにAIへ呼ばせず、Jennifer側の自律アニメーションとして扱う。
+CrimsonのMorph生成では閉眼不足と外眼角側の変位減衰を調整済みで、`eyeBlinkLeft / eyeBlinkRight`を含むFBXをUEへ再インポート済み。
 
 ### 17.5.3 視線 / Head Look At
 

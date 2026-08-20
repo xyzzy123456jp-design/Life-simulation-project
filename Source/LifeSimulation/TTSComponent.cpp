@@ -35,10 +35,60 @@ void UTTSComponent::SpeakText(const FString& Text)
 		return;
 	}
 
-	SendSpeechRequest(Text, false);
+	SendSpeechRequest(Text, TEXT("neutral"), 0.0f, false);
 }
 
-void UTTSComponent::SendSpeechRequest(const FString& Text, bool bIsRetry)
+void UTTSComponent::SpeakTextWithEmotion(const FString& Text, const FString& Emotion, float Intensity)
+{
+	if (Text.IsEmpty())
+	{
+		return;
+	}
+
+	SendSpeechRequest(Text, Emotion, Intensity, false);
+}
+
+FString UTTSComponent::BuildEmotionInstruction(const FString& Emotion, float Intensity) const
+{
+	const FString NormalizedEmotion = Emotion.ToLower();
+	const float SafeIntensity = FMath::Clamp(Intensity, 0.0f, 1.0f);
+	const TCHAR* Strength = SafeIntensity < 0.35f
+		? TEXT("Keep the emotional coloring very subtle.")
+		: (SafeIntensity < 0.70f
+			? TEXT("Use a moderate emotional coloring.")
+			: TEXT("Make the emotion clear, but restrained and natural."));
+
+	FString Style;
+	if (NormalizedEmotion == TEXT("happy"))
+	{
+		Style = TEXT("Speak in a warm and cheerful tone.");
+	}
+	else if (NormalizedEmotion == TEXT("sad"))
+	{
+		Style = TEXT("Speak softly in a subdued and slightly sad tone, while remaining clear.");
+	}
+	else if (NormalizedEmotion == TEXT("surprised"))
+	{
+		Style = TEXT("Speak with noticeable surprise and lively intonation.");
+	}
+	else if (NormalizedEmotion == TEXT("confused"))
+	{
+		Style = TEXT("Speak with mild uncertainty and a slightly questioning tone.");
+	}
+	else if (NormalizedEmotion == TEXT("embarrassed"))
+	{
+		Style = TEXT("Speak in a slightly bashful and flustered tone.");
+	}
+	else
+	{
+		return TEXT("Speak naturally in a calm conversational tone, at a normal pace and volume.");
+	}
+
+	return FString::Printf(TEXT("%s %s Keep a natural conversational pace and volume. Do not exaggerate, shout, or rush."),
+		*Style, Strength);
+}
+
+void UTTSComponent::SendSpeechRequest(const FString& Text, const FString& Emotion, float Intensity, bool bIsRetry)
 {
 	if (ApiKey.IsEmpty())
 	{
@@ -48,13 +98,23 @@ void UTTSComponent::SendSpeechRequest(const FString& Text, bool bIsRetry)
 	}
 
 	LastRequestedText = Text;
+	LastRequestedEmotion = Emotion.ToLower();
+	LastRequestedEmotionIntensity = FMath::Clamp(Intensity, 0.0f, 1.0f);
 	bLastRequestWasRetry = bIsRetry;
+	if (!bIsRetry)
+	{
+		TtsRequestStartTimeSeconds = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY] tts_request_start"));
+	}
+	const FString EmotionInstruction = BuildEmotionInstruction(
+		LastRequestedEmotion, LastRequestedEmotionIntensity);
 
 	TSharedPtr<FJsonObject> JsonBody = MakeShared<FJsonObject>();
 	JsonBody->SetStringField(TEXT("model"), Model);
 	JsonBody->SetStringField(TEXT("input"), Text);
 	JsonBody->SetStringField(TEXT("voice"), Voice);
 	JsonBody->SetStringField(TEXT("response_format"), TEXT("pcm")); // 生PCM(24kHz, 16bit, モノラル)で受け取る
+	JsonBody->SetStringField(TEXT("instructions"), EmotionInstruction);
 
 	FString RequestBodyString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBodyString);
@@ -69,12 +129,15 @@ void UTTSComponent::SendSpeechRequest(const FString& Text, bool bIsRetry)
 	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UTTSComponent::OnSpeechResponseReceived);
 	HttpRequest->ProcessRequest();
 
+	UE_LOG(LogTemp, Log, TEXT("[TTS][LEGACY][EMOTION] model=%s emotion=%s ai_intensity=%.2f instruction=\"%s\""),
+		*Model, *LastRequestedEmotion, LastRequestedEmotionIntensity, *EmotionInstruction);
 	UE_LOG(LogTemp, Log, TEXT("TTS: 音声合成をリクエストしました(model=%s voice=%s retry=%s): %s"),
 		*Model, *Voice, bIsRetry ? TEXT("true") : TEXT("false"), *Text);
 }
 
 void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
+	const double TtsResponseTimeSeconds = FPlatformTime::Seconds();
 	const bool bFailed = !bWasSuccessful || !Response.IsValid() || Response->GetResponseCode() != 200;
 
 	if (bFailed)
@@ -87,7 +150,7 @@ void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpRespo
 		if (!bLastRequestWasRetry)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("TTS: 1回だけ再試行します"));
-			SendSpeechRequest(LastRequestedText, true);
+			SendSpeechRequest(LastRequestedText, LastRequestedEmotion, LastRequestedEmotionIntensity, true);
 			return;
 		}
 
@@ -102,6 +165,11 @@ void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpRespo
 		OnTTSFailed.Broadcast(TEXT("受信した音声データが空です"));
 		return;
 	}
+	const double TtsElapsedSeconds = TtsRequestStartTimeSeconds > 0.0
+		? TtsResponseTimeSeconds - TtsRequestStartTimeSeconds
+		: 0.0;
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY] tts_response_done elapsed=%.3f sec bytes=%d"),
+		TtsElapsedSeconds, PcmBytes.Num());
 
 	// ファイルに保存せず、メモリ上のPCMバイト列から直接再生用のSoundWaveを組み立てる
 	USoundWaveProcedural* SoundWave = NewObject<USoundWaveProcedural>(this);
@@ -139,6 +207,9 @@ void UTTSComponent::OnSpeechResponseReceived(FHttpRequestPtr Request, FHttpRespo
 	// 毎回新しい一時的なAudioComponentを生成して再生する。
 	// 使い回すと内部状態が壊れて再生できなくなることがあるための対策。
 	CurrentAudioComponent = UGameplayStatics::SpawnSound2D(this, SoundWave, PlaybackVolumeMultiplier);
+	const double PlaybackStartLatencySeconds = FPlatformTime::Seconds() - TtsResponseTimeSeconds;
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY] playback_start pcm_prepare_elapsed=%.3f sec"),
+		PlaybackStartLatencySeconds);
 
 	UE_LOG(LogTemp, Log, TEXT("TTS: 音声再生を開始しました(%d bytes, %.2f秒)"), PcmBytes.Num(), DurationSeconds);
 	OnPlaybackStarted.Broadcast();
