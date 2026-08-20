@@ -11,6 +11,8 @@ UWhisperTranscriberComponent::UWhisperTranscriberComponent()
 
 void UWhisperTranscriberComponent::TranscribeFromMicRecorder(UMicRecorderComponent* MicRecorder)
 {
+	SttTotalStartTimeSeconds = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY][STT] audio_prepare_start"));
 	if (!MicRecorder)
 	{
 		UE_LOG(LogTemp, Error, TEXT("WhisperTranscriber: MicRecorderComponentが指定されていません"));
@@ -25,6 +27,9 @@ void UWhisperTranscriberComponent::TranscribeFromMicRecorder(UMicRecorderCompone
 		OnTranscriptionFailed.Broadcast(TEXT("録音データをWAV化できませんでした(録音データが空の可能性があります)"));
 		return;
 	}
+	UE_LOG(LogTemp, Log,
+		TEXT("[LATENCY][LEGACY][STT] audio_prepare_done elapsed=%.3f sec wav_bytes=%d"),
+		FPlatformTime::Seconds() - SttTotalStartTimeSeconds, WavBytes.Num());
 
 	SendWavBytesToWhisper(WavBytes, false);
 }
@@ -40,7 +45,6 @@ void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& Wa
 
 	LastRequestedWavBytes = WavBytes;
 	bLastRequestWasRetry = bIsRetry;
-
 	// multipart/form-dataのボディを手動で構築する(UE5のHTTPモジュールに専用APIがないため)
 	TArray<uint8> RequestBody;
 
@@ -53,7 +57,7 @@ void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& Wa
 	// --- modelパート ---
 	AppendText(FString::Printf(TEXT("--%s\r\n"), *Boundary));
 	AppendText(TEXT("Content-Disposition: form-data; name=\"model\"\r\n\r\n"));
-	AppendText(TEXT("whisper-1\r\n"));
+	AppendText(Model + TEXT("\r\n"));
 
 	// --- languageパート(指定がある場合のみ) ---
 	if (!Language.IsEmpty())
@@ -80,6 +84,11 @@ void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& Wa
 	HttpRequest->SetHeader(TEXT("Content-Type"), FString::Printf(TEXT("multipart/form-data; boundary=%s"), *Boundary));
 	HttpRequest->SetContent(RequestBody);
 	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UWhisperTranscriberComponent::OnWhisperResponseReceived);
+	SttRequestStartTimeSeconds = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY] stt_start"));
+	UE_LOG(LogTemp, Log,
+		TEXT("[LATENCY][LEGACY][STT] request_start model=%s retry=%s request_bytes=%d"),
+		*Model, bIsRetry ? TEXT("true") : TEXT("false"), RequestBody.Num());
 	HttpRequest->ProcessRequest();
 
 	UE_LOG(LogTemp, Log, TEXT("WhisperTranscriber: Whisper APIへ送信しました(%d bytes)"), RequestBody.Num());
@@ -87,6 +96,12 @@ void UWhisperTranscriberComponent::SendWavBytesToWhisper(const TArray<uint8>& Wa
 
 void UWhisperTranscriberComponent::OnWhisperResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
+	const double ResponseReceivedTimeSeconds = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY][STT] response_done model=%s elapsed=%.3f sec"),
+		*Model,
+		SttRequestStartTimeSeconds > 0.0
+			? ResponseReceivedTimeSeconds - SttRequestStartTimeSeconds
+			: 0.0);
 	if (!bWasSuccessful || !Response.IsValid())
 	{
 		UE_LOG(LogTemp, Error, TEXT("WhisperTranscriber: HTTPリクエストに失敗しました(ネットワークエラー)"));
@@ -143,6 +158,13 @@ void UWhisperTranscriberComponent::OnWhisperResponseReceived(FHttpRequestPtr Req
 		return;
 	}
 
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY][STT] parse_done elapsed=%.3f sec"),
+		FPlatformTime::Seconds() - ResponseReceivedTimeSeconds);
+	const double SttElapsedSeconds = SttTotalStartTimeSeconds > 0.0
+		? FPlatformTime::Seconds() - SttTotalStartTimeSeconds
+		: 0.0;
+	UE_LOG(LogTemp, Log, TEXT("[LATENCY][LEGACY] stt_done elapsed=%.3f sec"), SttElapsedSeconds);
+	UE_LOG(LogTemp, Log, TEXT("[STT][LEGACY][RESULT] model=%s text=\"%s\""), *Model, *TranscribedText);
 	UE_LOG(LogTemp, Log, TEXT("WhisperTranscriber: 文字起こし成功: %s"), *TranscribedText);
 	OnTranscriptionComplete.Broadcast(TranscribedText);
 }

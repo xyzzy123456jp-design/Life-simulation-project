@@ -9,6 +9,15 @@ class IWebSocket;
 class USoundWaveProcedural;
 class UAudioComponent;
 
+enum class EExpressionApplyResult : uint8
+{
+	Applied,
+	UnknownEmotion,
+	SubsystemUnavailable,
+	TargetComponentUnavailable,
+	InvalidWorld
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRealtimeConnected);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRealtimeDisconnected, const FString&, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRealtimeError, const FString&, ErrorMessage);
@@ -99,6 +108,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Realtime")
 	bool IsConnected() const { return bIsConnected; }
 
+	// Create a user input_text item and start a new response. This initial
+	// response.create is intentionally independent from the post-tool-call one.
+	UFUNCTION(BlueprintCallable, Category = "Realtime")
+	bool SendTextMessage(const FString& Text);
+
 	// AIが現在喋っているか(リップシンクに使う)
 	UFUNCTION(BlueprintCallable, Category = "Realtime")
 	bool IsAssistantSpeaking() const;
@@ -131,6 +145,34 @@ private:
 	void HandleWebSocketMessage(const FString& Message);
 	void SendJson(const class TSharedRef<class FJsonObject>& JsonObject);
 	void SendSessionUpdate();
+
+	// --- Realtime Function Calling / facial expression ---
+	EExpressionApplyResult ApplyExpression(const FString& Emotion, float Intensity);
+	void HandleFunctionCallArgumentsDone(const TSharedPtr<class FJsonObject>& JsonObject);
+	void HandleResponseDoneForFunctionCalls(const TSharedPtr<class FJsonObject>& JsonObject);
+	void SendFunctionCallOutput(const FString& CallId, const FString& OutputJson);
+	void SendResponseCreate();
+	void MarkFunctionCallCompleted(const FString& ResponseId, const FString& CompletionKey);
+	void TryFinalizeFunctionResponse(const FString& ResponseId);
+	void CleanupFunctionResponse(const FString& ResponseId);
+	void ClearPendingFunctionCallState();
+	static FString MakeFunctionCallCompletionKey(const FString& CallId, const FString& ItemId, const FString& ResponseId, int32 OutputIndex);
+
+	struct FPendingFunctionResponse
+	{
+		TSet<FString> ExpectedCallKeys;
+		TSet<FString> CompletedCallKeys;
+		bool bResponseDoneReceived = false;
+		bool bResponseCreateSent = false;
+	};
+
+	TMap<FString, FPendingFunctionResponse> PendingFunctionResponses;
+	TSet<FString> GloballyCompletedFunctionCallKeys;
+	// Only the exact, case-sensitive user prefix "Expression test:" arms this
+	// flag. It classifies the next express_emotion call without changing the
+	// existing expression application path.
+	bool bNextExpressionCallIsAiTest = false;
+	int32 PendingTextExpressionTestRequests = 0;
 
 	// --- マイクキャプチャ(24kHzへダウンサンプリングしつつ送信) ---
 	Audio::FAudioCapture AudioCapture;
