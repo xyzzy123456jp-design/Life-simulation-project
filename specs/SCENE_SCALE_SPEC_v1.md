@@ -33,6 +33,24 @@
 >   理由: 「破棄した後にRemoveを試みる」という順序は、破棄済みポインタを扱うリスクがあり、「Removeしてから破棄する」の順序であるべきだったため。
 > - [チャッピー指摘→反映] 既にコード例として存在していた`OnSceneManagerShutdownOrLevelChange()`(`BaseScaleByInstance.Empty()`)が、変更対象ファイル一覧・実装順序・合格条件のいずれにも反映されていなかったため、3箇所すべてに追加した。
 >   理由: コード例にあるのに変更対象ファイル一覧や合格条件から漏れていると、実装時・テスト時にこの処理の実装自体が見落とされるリスクがあるため。
+> - [チャッピー指摘→反映] ステップ0.5のGo/No-Goテストに、テスト終了後に対象Level InstanceのScaleを必ず元の`CurrentScale`へ戻し、確認してから次工程へ進む手順を追加した。
+>   理由: セクション3の`BaseScale`は「補正前の元Scale」を一度だけキャプチャする前提だが、テスト用の`TestScale`のまま戻さず`CaptureBaseScale()`へ進むと、誤ったScaleが`BaseScale`として記録され、「元Scale × CorrectionScale」という設計そのものが壊れてしまうため。
+> - [チャッピー指摘→反映] シーン補正値の管理方式が「`UDataTable`またはシンプルな`TMap`」とどちらでもよい書き方だったが、後続のセクション(実装順序等)では既に`SceneScaleDataTable`前提の記述になっており齟齬があったため、`UDataTable`(`SceneScaleDataTable`)に確定した。
+>   理由: 仕様書内で管理方式の選択が確定していないまま、別の箇所ではDataTable前提で書かれている状態は矛盾であるため。
+> - [チャッピー指摘→反映] セクション3.5(Pivot/Anchor位置補正)に、位置補正を行う場合はScaleの`BaseScale`と同じ考え方(元のLocationを一度だけ保持し、都度その値から算出し直す)を適用し、「現在のLocationへ差分を毎回加算する」実装を禁止する旨を追加した。合格条件にも、10回程度の往復でAnchor位置がドリフトしないことの確認を追加した。
+>   理由: Scale側は`BaseScaleByInstance`で累積を防いでいるのに、Location側の補正方式が未定義のままだと、同じ考え方が適用されずシーン切り替えを繰り返すたびにLocationがズレていく累積ドリフトの事故が起きうるため。
+> - [チャッピー指摘→反映(軽微)] `OnLevelInstanceDestroyed()`の呼び出しタイミングについて、「`AActor::Destroyed()`のオーバーライド内や`EndPlay()`」という例を、実際のライフサイクルに沿って判断してよい旨の表現に緩和した。
+>   理由: 実際の既存コードが「SceneManager自身がDestroyを呼ぶ構造」とは限らず、例として挙げた具体的な関数名に実装を縛りすぎない方が安全なため。
+> - [チャッピー指摘→反映] セクション3.5で位置補正時に`BaseLocationByInstance`(または`BaseTransformByInstance`)を導入する設計を追加したにもかかわらず、セクション5(変更対象ファイルまとめ)・合格条件10・12・実装順序5番がまだ`BaseScaleByInstance`のみの記述のままだったため、位置補正を実装する場合はこれらすべてに`BaseLocationByInstance`(または統合構造)の追加・破棄時クリア・Level変更時クリアを含める旨を追記した。
+>   理由: 3.5でLocation側の管理方式を定義しても、他のセクションが更新されないままだと、実装者がScale側だけクリアしてLocation側の消し忘れ(古いエントリの残留)に気づかないリスクがあるため。
+> - [チャッピー指摘→反映] セクション2の`GetSceneScaleForScene()`の呼び出し例に、`CorrectionScale`が有限の正数であることを検証し、`0`・負数・`NaN`・`Inf`等の不正値の場合はWarningを出して`1.0`へフォールバックする処理を追加した。合格条件にも対応する項目を追加した。
+>   理由: `CorrectedScale = BaseScale * CorrectionScale`という計算式である以上、DataTableの行自体は存在するが値が不正(0、負数、NaN等)なケースを想定していないと、Level Instanceが潰れる・反転する・不定形になるといった破綻につながるため。
+> - [チャッピー指摘→反映] セクション2の呼び出し例では`CorrectionScale`を検証してから使っていたが、セクション3の`ApplySceneScale()`コード例は検証せず`GetSceneScaleForScene()`の戻り値をそのまま使っており、ガードの有無が箇所によって食い違っていたため、**検証責務を`GetSceneScaleForScene()`自身の内部へ一元化**し、呼び出し側(セクション3を含む全箇所)は常に安全な値を受け取れる設計に統一した。セクション2・3のコード例、および`GetSceneScaleForScene()`の名前についての説明文をこの方針に合わせて修正した。
+>   理由: 検証処理が呼び出し側に散らばると、今回のセクション3のように一部の呼び出し箇所で検証漏れが発生しやすい。関数自身が「常に安全な値を返す」契約を持てば、以降呼び出し箇所が増えても検証漏れの心配がなくなるため。
+> - [チャッピー指摘→反映] 合格条件12(ゲーム開始直後の初期表示シーンのCapture確認)に、位置補正を実装している場合は`BaseLocationByInstance`(または`BaseTransformByInstance`)にも元Locationがキャプチャ済みであることを確認する旨を追加した。
+>   理由: 3.5で「`CaptureBaseScale()`と同じタイミングで元のLocationも一度だけキャプチャする」と定義していたが、合格条件12は`BaseScaleByInstance`の存在確認のみで、Location側の初期キャプチャ確認が抜けていたため。
+> - [チャッピー指摘→反映] `AnchorCorrection`の算出方法を、「Scale適用前後で同じ基準AnchorのWorld座標がどれだけズレたか」を実測し、その差分を打ち消す方向へLocationを補正する、という具体的な手順として明記した。
+>   理由: 以前の版では「必要ならSceneScaleAnchorを持たせる」としか書かれておらず、`AnchorCorrection`の値そのものをどう算出するかが未定義だった。この曖昧さを残すと、実装者が経験則で数値を手動調整する(見た目が合うまでオフセットを弄る)実装になりやすく、符号ミスや将来の保守性低下につながるため。
 
 このドキュメントは、複数の背景シーン(車内・Cigar Room・今後追加予定の背景)の間で、Jenniferと背景の実寸スケールを合わせるための仕様。
 Claude Codeが実装に着手できるよう、既存のMキーシーン切り替え処理を踏まえて具体化する。
@@ -75,6 +93,7 @@ Epic公式ドキュメント上、Level Instance Actorへ適用したTransform�
    - Collisionも見た目と一致してScaleされる(壁を通り抜けられたり、逆に見えない壁に当たったりしない)
    - 床の位置が意図せず浮いたり沈んだりしない
    - レベルインスタンスがストリーミング(非表示→表示)を経ても、変更したScaleが保持される
+4. **【必須】テスト終了後、対象Level Instanceのscaleを、手順1で記録した`CurrentScale`へ必ず戻し、見た目・Collision・床位置が元の状態へ復帰したことを確認してから次工程へ進むこと。テスト用の`TestScale`のまま次のセクション(3の`CaptureBaseScale()`)へ進んではならない。**(理由: セクション3の`BaseScale`は「補正前の元Scale」を一度だけキャプチャする前提の設計になっている。もしテスト用Scaleを戻さないまま`CaptureBaseScale()`を実行すると、本来の`CurrentScale`(例: `1.2`)ではなくテスト後の`TestScale`(例: `0.96`)が誤って`BaseScale`として記録されてしまい、「元Scale × CorrectionScale」というセクション3の設計そのものが壊れる)
 
 **この結果が「Go(期待どおり動く)」の場合のみ、以降のセクション(1〜7)の設計を実装する。「No-Go(期待どおり動かない)」の場合は、Level Instance全体をランタイムでScaleするという本仕様の設計自体を見直す必要がある**(例えば、レベルインスタンス化せず個別Static Meshアクター群として配置し直す、Scale変更を実行時ではなくエディタ時の一度きりの調整に限定する、等の代替案を検討する)。
 
@@ -94,7 +113,7 @@ Epic公式ドキュメント上、Level Instance Actorへ適用したTransform�
 
 ## 2. シーンスケール補正値の管理
 
-表情システムの係数(FACIAL_EXPRESSION_SPEC参照)と同じ考え方で、シーンごとの補正値をC++へ直書きせず、`UDataTable`(またはシンプルな`TMap<FName, float>`)で管理する。
+表情システムの係数(FACIAL_EXPRESSION_SPEC参照)と同じ考え方で、シーンごとの補正値をC++へ直書きせず`UDataTable`で管理する。**シーン補正値は`SceneScaleDataTable`(`UDataTable`)で管理することをここで確定する。`TMap<FName, float>`のような直書き管理は採用しない。**(以前の版では「`UDataTable`またはシンプルな`TMap`」とどちらでもよい書き方だったが、後続のセクション(実装順序等)では既に`SceneScaleDataTable`の新規作成を前提とした記述になっており、齟齬があったため統一した)
 
 ```
 SceneName,   CorrectionScale
@@ -121,8 +140,30 @@ CorrectionScale = 210 / 250 = 0.84
 
 ```cpp
 // このコード自体は補正倍率の具体的な数値を一切知らない。数値はすべてDataTableアセット側にある。
-const float CorrectionScale = GetSceneScaleForScene(CurrentSceneName); // DataTable参照、見つからない場合は1.0を返す
+// GetSceneScaleForScene()自身が、未登録シーンおよび不正値の両方を1.0へフォールバックした
+// 「安全な値」だけを返す責務を持つ(詳細は下記【必須】を参照)。呼び出し側で追加の検証は不要。
+const float CorrectionScale = GetSceneScaleForScene(CurrentSceneName);
 ```
+
+**`CorrectionScale`の不正値ガード(【必須】)**: DataTableに行自体は存在するが、値が`0`・負数・`NaN`・`Inf`等の不正値だった場合の扱いを明記する。`CorrectedScale = BaseScale * CorrectionScale`という計算式である以上、これらの値をそのまま使うと、Level Instanceが潰れる(Scale`0`)・反転する(Scale負)・不定形になる(`NaN`)といった破綻につながる。
+
+**この検証は`GetSceneScaleForScene()`自身の内部で行い、呼び出し側(セクション3の`ApplySceneScale()`を含む、この関数を呼ぶ全ての箇所)には安全な値だけを返すこと。呼び出し側で個別に`IsFinite`等の検証を行う設計にはしない。** 内部実装イメージ:
+
+```cpp
+float GetSceneScaleForScene(FName SceneName)
+{
+    const float RawValue = /* DataTableからSceneNameの行を検索し、見つからなければ1.0を返す既存ロジック */;
+
+    if (!FMath::IsFinite(RawValue) || RawValue <= 0.0f)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SCENE_SCALE] 不正なCorrectionScale(%f)をSceneName=%sで検出、1.0へフォールバック"), RawValue, *SceneName.ToString());
+        return 1.0f;
+    }
+    return RawValue;
+}
+```
+
+これにより、未登録シーン・不正値のどちらのケースも同じ関数内で一元的に扱われ、検証処理が呼び出し側(セクション3等)に散らばらない。
 
 新しい背景シーンを追加するたびに、ステップ0と同じ診断(実測比較)を行い、DataTableへ1行追加する運用とする。
 
@@ -189,7 +230,7 @@ void UYourSceneManager::ApplySceneScale(ALevelInstance* TargetLevelInstance, FNa
         return;
     }
 
-    const float CorrectionScale = GetSceneScaleForScene(SceneName); // DataTable参照、見つからない場合は1.0を返す
+    const float CorrectionScale = GetSceneScaleForScene(SceneName); // 未登録シーン・不正値のいずれも1.0へフォールバック済みの安全な値が返る(セクション2参照)
     const FVector CorrectedScale = (*FoundBaseScale) * CorrectionScale;
     TargetLevelInstance->SetActorScale3D(CorrectedScale);
 }
@@ -221,11 +262,11 @@ void UYourSceneManager::OnSceneManagerShutdownOrLevelChange()
 
 `BaseScaleByInstance`は必ずシーン切り替えロジック導入前(既存の意図的なScaleがまだ何もいじられていない状態)に、対象レベルインスタンスごとに一度だけキャプチャすること。これにより、Mキーで何度往復しても補正倍率が累積せず、常に「そのレベルインスタンス固有の元Scale × 診断で求めた補正倍率」に収束する(セクション6の合格条件3と対応)。
 
-**レベルインスタンスが表示/非表示の切り替えではなく、シーン切り替えのたびに破棄→再生成される実装だった場合は特に注意する**(セクション3の確認事項2と対応)。再生成された新しいActorは古いActorとは別のポインタになるため、`BaseScaleByInstance`には新しいエントリとして扱われ、`CaptureBaseScale()`を再度呼ぶ必要がある。同時に、破棄された旧Actorのエントリは`TObjectKey`が弱参照ではない以上自動的には消えないため、`OnLevelInstanceDestroyed()`を**破棄直前(対象Actorをまだ有効なポインタとして識別できるタイミング。例: `AActor::Destroyed()`のオーバーライド内や`EndPlay()`)** に必ず呼び、古いエントリが`BaseScaleByInstance`に溜まり続けないようにする。「破棄した後にRemoveを試みる」の順にはしないこと。この呼び出し漏れがあると`ApplySceneScale()`が`BaseScale未キャプチャ`のWarningを出して補正をスキップしてしまうため、シーン切り替え処理の中で「レベルインスタンスをロード・生成した直後は必ず`CaptureBaseScale()`を呼ぶ」ことを徹底する。
+**レベルインスタンスが表示/非表示の切り替えではなく、シーン切り替えのたびに破棄→再生成される実装だった場合は特に注意する**(セクション3の確認事項2と対応)。再生成された新しいActorは古いActorとは別のポインタになるため、`BaseScaleByInstance`には新しいエントリとして扱われ、`CaptureBaseScale()`を再度呼ぶ必要がある。同時に、破棄された旧Actorのエントリは`TObjectKey`が弱参照ではない以上自動的には消えないため、**実際のライフサイクルを確認し、対象Actorをまだ有効なポインタとして識別できるタイミングで`OnLevelInstanceDestroyed()`を呼ぶこと。** SceneManager自身が破棄を所有している構造であれば、`Remove → Destroy`の順にする(例: `AActor::Destroyed()`のオーバーライド内や`EndPlay()`が候補になりうるが、必ずしもこれらに限定されない。実際の破棄経路に合わせて判断すること)。「破棄した後にRemoveを試みる」の順にはしないこと。この呼び出し漏れがあると`ApplySceneScale()`が`BaseScale未キャプチャ`のWarningを出して補正をスキップしてしまうため、シーン切り替え処理の中で「レベルインスタンスをロード・生成した直後は必ず`CaptureBaseScale()`を呼ぶ」ことを徹底する。
 
 **【矛盾修正4】ゲーム開始時に既に表示されているシーン(通常は車内)は、Mキーでの切り替え処理と同じ「ロード・生成」イベントを経由しない可能性がある(セクション3の確認事項4)。この場合、そのレベルインスタンスは一度も`CaptureBaseScale()`が呼ばれないまま補正対象になり得る。補正倍率が`1.0`のシーンでは「何もしない」結果と「正しく補正した」結果が偶然一致するため見た目上は問題が起きにくいが、将来そのシーンにも意図的な補正が必要になった場合にサイレントに効かなくなる。`BeginPlay`等のゲーム開始処理で、その時点で表示されている全てのシーン用レベルインスタンスに対し、明示的に`CaptureBaseScale()`を呼ぶこと。**
 
-`GetSceneScaleForScene()`という名前は例であり、既存の設定管理・DataTable読み込みの共通処理があればそれを優先する。
+`GetSceneScaleForScene()`という名前は例であり、既存の設定管理・DataTable読み込みの共通処理があればそれを優先する。**ただし名前や実装場所を変えた場合でも、「未登録シーン・不正値の両方を1.0へフォールバックして安全な値だけを返す」という責務(セクション2参照)は、この関数(相当のもの)自身が持つこと。**
 
 ## 3.5 Scale適用時のPivot/Anchor位置(【必須】実装前に確認すること)
 
@@ -241,7 +282,25 @@ Level InstanceのScaleはそのActorのPivot基準で行われるため、例え
    - レベルインスタンスのPivotを、床面などScaleの影響を受けたくない基準点に設定し直す
    - または、Scale適用後に基準Anchor(例: 床の一点)のWorld座標が変わらないよう、Scale変更と同時にレベルインスタンスの位置(Location)を補正する
 
-必要であれば、シーンごとに`SceneScaleAnchor`(基準点を表すデータ)を持たせ、Scale変更後にその基準点のWorld位置が変わらないよう位置補正する設計にする。
+**位置補正を行う場合の必須設計(Locationの累積ドリフト防止)**: Scaleの`BaseScale`(セクション3)と全く同じ考え方を、Locationにも適用すること。**「現在のLocationへ毎回差分を加算する」実装は禁止する。** これを行うと、シーン切り替えを繰り返すたびに(例: 1回目`+20`、2回目`さらに+20`、3回目`さらに+20`のように)Location自体が累積してドリフトしてしまう。
+
+代わりに、Scaleと同じ`TObjectKey<ALevelInstance>`をキーとした`BaseLocationByInstance`(またはScaleと統合した`BaseTransformByInstance`)のような構造を用意し、`CaptureBaseScale()`と同じタイミングで元のLocationも一度だけキャプチャする。最終的なLocationは、常に
+
+```text
+FinalLocation = BaseLocation + AnchorCorrection(その時点のCorrectionScaleから算出)
+```
+
+のように、**保持している「元のLocation」を起点に毎回算出し直す**こと(現在のLocationを起点にした差分の積み上げにしない)。破棄・再生成時のクリア(`OnLevelInstanceDestroyed()`、`OnSceneManagerShutdownOrLevelChange()`)も、Scaleと同様にLocation側にも適用すること。
+
+**`AnchorCorrection`の算出方法(【必須】)**: `AnchorCorrection`をどう計算するかを実装者の裁量や経験則による手動オフセットに任せない。以下の方法で算出すること。
+
+1. `BaseLocation`(元のScale、Scale`1.0`相当の状態)における、基準Anchor(例: 床の一点、入口の位置)のWorld座標を`AnchorWorldBeforeScale`とする
+2. `BaseScale × CorrectionScale`を適用した後(Locationはまだ補正前、`BaseLocation`のまま)の、同じAnchorのWorld座標を`AnchorWorldAfterScale`とする(Pivotを基準にScaleするとこの座標がズレる、というのが3.5冒頭で説明した問題そのもの)
+3. `AnchorCorrection = AnchorWorldBeforeScale - AnchorWorldAfterScale`とし、**このズレを打ち消す方向へ**Level InstanceのLocationへ加算する
+
+つまり、「Scale適用前後で同じAnchorのWorld位置がどれだけズレたか」を実測し、その差分を打ち消す方向へLocationを補正する、という考え方に統一する。符号を経験則で調整する(見た目が合うまで数値をいじる)実装は避けること。
+
+必要であれば、シーンごとに`SceneScaleAnchor`(基準点を表すデータ)を持たせ、Scale変更後にその基準点のWorld位置が変わらないよう、上記の方式で位置補正する設計にする。
 
 ## 3.6 Level Instance内部のGameplay Actorの扱い(【必須】実装前に確認すること)
 
@@ -279,7 +338,7 @@ Gameplay系(Scale対象外、別階層またはメインレベル側に配置)
 |---|---|
 | シーン切り替えを担当する既存クラス | Scale適用処理の呼び出しを追加(ステップ3で特定した箇所) |
 | `SceneScaleDataTable`(新規DataTableアセット) | シーンごとの補正値を追加 |
-| `SceneScale`関連のC++(新規、または既存Manager内) | `GetSceneScaleForScene()`、`CaptureBaseScale()`、`ApplySceneScale()`、`OnLevelInstanceDestroyed()`、`OnSceneManagerShutdownOrLevelChange()`、`BaseScaleByInstance`(レベルインスタンスごとのBaseScale管理)を追加 |
+| `SceneScale`関連のC++(新規、または既存Manager内) | `GetSceneScaleForScene()`、`CaptureBaseScale()`、`ApplySceneScale()`、`OnLevelInstanceDestroyed()`、`OnSceneManagerShutdownOrLevelChange()`、`BaseScaleByInstance`(レベルインスタンスごとのBaseScale管理)を追加。**位置補正(3.5)を実装する場合は、`BaseLocationByInstance`(または`BaseScaleByInstance`と統合した`BaseTransformByInstance`)も追加対象に含める** |
 
 ## 6. 動作確認・合格条件
 
@@ -288,13 +347,15 @@ Gameplay系(Scale対象外、別階層またはメインレベル側に配置)
 3. Mキーで車内↔Cigar Roomを何度も往復しても、Scaleが正しく再適用され、意図しない値の蓄積(補正倍率が毎回掛け合わされて累積してしまう等の実装ミス)が起きないことを確認する。`BaseScale`が固定値として保持され、都度`BaseScale × CorrectionScale`で再計算されていることを確認する
 4. Jennifer自身のActor Scaleが、どのシーンでも常にCanonicalな基準値のまま変化していないことを確認する(通常は`1,1,1`だが、将来Jenniferの基準Actor Scale自体が`0.98`等に変更された場合でも、「シーンによって変化しない」ことが本質であり、`1,1,1`固定という数値自体が要件ではない)
 5. 新しい背景シーンをDataTableに追加していない状態(未登録シーン)でシーン切り替えが呼ばれても、クラッシュせず既定の補正倍率(`1.0`)にフォールバックすることを確認する
-6. Scale補正後も、床面・入口・Spawn位置などの基準AnchorのWorld座標が、Scale変更前と一致している(ズレていない)ことを確認する
-7. Cigar RoomのLevel Instance内にTrigger・Spawn Point・Blocking Volume等のGameplay Actorが含まれる場合、Scale適用によってそれらの位置・当たり判定が意図せず変化していないことを確認する
-8. Vehicle用・CigarRoom用など複数のレベルインスタンスを行き来しても、それぞれ固有のBaseScaleが正しく使われ、片方のBaseScaleがもう片方に誤って流用されないことを確認する
-9. レベルインスタンスが破棄→再生成される実装の場合、再生成のたびに新しいActorへ`CaptureBaseScale()`が呼ばれ、古いActorのBaseScaleが誤って再利用されないことを確認する
-10. レベルインスタンスが破棄される際、破棄直前のタイミングで`OnLevelInstanceDestroyed()`(または同等の処理)が呼ばれ、`BaseScaleByInstance`から該当エントリが正しく削除される(破棄されたActorのエントリが残り続けない)ことを確認する
-11. ゲーム開始直後、まだ一度もMキーを押していない状態でも、その時点で表示されているシーン(通常は車内)のレベルインスタンスに対して`CaptureBaseScale()`が呼ばれており、`BaseScaleByInstance`にエントリが存在することを確認する
-12. Level/Map変更、またはSceneManager終了時に`OnSceneManagerShutdownOrLevelChange()`が呼ばれ、`BaseScaleByInstance`が`Empty()`される(前Levelに属していたエントリが新しいLevelへ残り続けない)ことを確認する
+6. **DataTableに`0`・負数・`NaN`・`Inf`等の不正な`CorrectionScale`を設定しても、Level Instanceが0倍・負Scale・不定形にならず、Warningログとともに`1.0`へ安全にフォールバックすることを確認する**
+7. Scale補正後も、床面・入口・Spawn位置などの基準AnchorのWorld座標が、Scale変更前と一致している(ズレていない)ことを確認する
+8. Cigar RoomのLevel Instance内にTrigger・Spawn Point・Blocking Volume等のGameplay Actorが含まれる場合、Scale適用によってそれらの位置・当たり判定が意図せず変化していないことを確認する
+9. Vehicle用・CigarRoom用など複数のレベルインスタンスを行き来しても、それぞれ固有のBaseScaleが正しく使われ、片方のBaseScaleがもう片方に誤って流用されないことを確認する
+10. レベルインスタンスが破棄→再生成される実装の場合、再生成のたびに新しいActorへ`CaptureBaseScale()`が呼ばれ、古いActorのBaseScaleが誤って再利用されないことを確認する
+11. レベルインスタンスが破棄される際、破棄直前のタイミングで`OnLevelInstanceDestroyed()`(または同等の処理)が呼ばれ、`BaseScaleByInstance`から該当エントリが正しく削除される(破棄されたActorのエントリが残り続けない)ことを確認する。**位置補正(3.5)を実装している場合は、`BaseLocationByInstance`(または統合した構造)からも同時にエントリが削除されることを確認する**
+12. ゲーム開始直後、まだ一度もMキーを押していない状態でも、その時点で表示されているシーン(通常は車内)のレベルインスタンスに対して`CaptureBaseScale()`が呼ばれており、`BaseScaleByInstance`にエントリが存在することを確認する。**位置補正(3.5)を実装している場合は、同じタイミングで`BaseLocationByInstance`(または`BaseTransformByInstance`)にも元Locationがキャプチャ済みであることを確認する**
+13. Level/Map変更、またはSceneManager終了時に`OnSceneManagerShutdownOrLevelChange()`が呼ばれ、`BaseScaleByInstance`が`Empty()`される(前Levelに属していたエントリが新しいLevelへ残り続けない)ことを確認する。**位置補正(3.5)を実装している場合は、`BaseLocationByInstance`(または統合した構造)も同時に`Empty()`されることを確認する**
+14. **位置補正(3.5)を実装している場合、車内↔Cigar Roomを10回程度往復しても、床・入口・Spawn等のAnchor World位置が徐々にドリフトしない(累積誤差でズレていかない)ことを確認する**
 
 ## 7. 実装順序
 
@@ -302,7 +363,7 @@ Gameplay系(Scale対象外、別階層またはメインレベル側に配置)
 2. 診断の結果、シーン側の実寸がズレていると判明した場合のみ、以下へ進む
 3. **ステップ0.5のGo/No-Goテストを実施する**。Level InstanceのランタイムScale変更が期待どおり動作しない場合、本仕様の設計自体を見直す(以降のステップは進めない)
 4. 対象レベルインスタンス(Cigar Room等)を開き、内部Actor一覧を確認する(セクション3.6)。Gameplay Actorが混在している場合は分離を検討する
-5. 対象レベルインスタンスのPivot位置と、Scale変更が床面・入口等の基準Anchorに与える影響を確認する(セクション3.5)
+5. 対象レベルインスタンスのPivot位置と、Scale変更が床面・入口等の基準Anchorに与える影響を確認する(セクション3.5)。**位置補正が必要な場合は、`BaseLocationByInstance`(または`BaseTransformByInstance`)の追加、および破棄・Level変更時のクリア処理も併せて設計する**
 6. ドア高・座面高・テーブル高など2〜3個の基準オブジェクトを実測し、`CorrectionScale = DesiredRealWorldSize / CurrentMeasuredSize`でCigar Roomの補正倍率を算出する(セクション2)。複数の基準で倍率がおおよそ一致することを確認する
 7. `SceneScaleDataTable`を作成し、車内=1.0、Cigar Room=算出した補正倍率を登録する
 8. 既存のシーン切り替え処理を確認し(セクション3)、レベルインスタンスのロード・生成直後に`CaptureBaseScale()`を呼ぶ処理、破棄直前に`OnLevelInstanceDestroyed()`を呼ぶ処理、`ApplySceneScale()`の呼び出し、ゲーム開始時に既に表示されているシーンへの`CaptureBaseScale()`呼び出し(セクション3の確認事項4)、およびLevel/Map変更時・SceneManager終了時に`OnSceneManagerShutdownOrLevelChange()`を呼ぶ処理を追加する
