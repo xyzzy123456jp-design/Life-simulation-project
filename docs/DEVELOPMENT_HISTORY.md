@@ -56,7 +56,17 @@ VRカーライフシミュレータープロジェクトの開発経過記録。
 - **診断機能**: 8キーで強いマゼンタKey Light 1灯へ切り替え、再押下で通常3灯へ復元できる。ログにはLightのActive/Visibility/Intensity/Color/距離/Cone/ChannelとJennifer全PrimitiveのChannel/Visibility/Shadowを出力する。
 - **非採用仮説**: Material差、Post Process Volume差、SkyLight単独差、Reflection Capture、Exposure残留、単一Scene Point Light、baked indirect、Jenniferの向き、LOD、背景の視覚的対比だけでは主因を説明できなかった。これらへ恒久変更は行っていない。
 
+### 座り機能の事前調査（未実装）
+
+- **担当・目的**: Codexが、各Sceneの椅子へJenniferを座らせる前に、既存Bodyアニメーション、Scene Anchor、CrimsonとMetaHuman BodyのTransform追従関係を実コード・アセット・実行ログから調査した。座りポーズと追従コードはまだ追加していない。
+- **座りアセット**: プロジェクトおよび導入済みEngine/Plugin Contentに、MetaHuman Bodyへそのまま使用できることを確認済みの座りAnimation Sequence/Montageは見つからなかった。現在のScene移動もRoot MotionではなくActor Teleportであるため、実装時はSeat AnchorがWorld Transformを所有するIn-Place座りアニメーションを第一候補とする。
+- **Body実行状態**: 実行ログではMetaHuman `Body`のAnimInstanceが`None`。既存C++にもMontage再生、Animation Mode切替、Root Motion制御はない。手ジェスチャーはBody Bone finalize後へ加算する構造なので、将来座りBase Poseを導入しても処理自体は併用できるが、座位での見た目は再確認が必要。
+- **Seat情報**: MyRoomには`RoomCharacterSeat / RoomPlayerSeat`があり、Transformを移動地点として利用している。他Sceneは`ConversationScenes.ini`の`JenniferOffset / JenniferRotation`から生成する`JenniferAnchor`のみで、椅子Actor、座面高、腰位置、Seat Anchor、座る/立つ状態は未管理。現在のAnchor→Teleport経路はSeat Anchorへ流用可能。
+- **Crimson追従**: `CrimsonGazeMorphComponent`は旧`StaticMesh`と同じ親へAttachし、そのRelative Transformを基準にBoundsで一度だけ自動整列する。`SetLeaderPoseComponent(nullptr, ...)`でMetaHuman Bodyとは分離され、Bodyの`pelvis / spine / neck_02 / head` Transformを毎TickまたはBone finalize後にコピーする処理もない。そのためCharacter Actorの移動・回転には追従するが、Body内部の座り姿勢には追従しない。
+- **既存顔機能**: 表情、まばたき、口パクはCrimson Morphへ直接適用し、うなずきはCrimson独自`head` Boneへ加算するため処理経路は維持できる。問題はBody座位に対するCrimson Component rootの位置・回転追従である。
+- **次の設計候補**: まずBody `head` SocketへのCrimson Component Attachと基準Relative Offset保存を検証する。Socket AttachでReference Pose差が吸収できない場合のみ、Body Bone finalize後に`head` Transformと保存済みOffsetを合成してCrimson rootへ適用する。Skeleton階層が非互換なためLeader PoseやMetaHuman Skeletonへの全面再Rigは第一候補にしない。
+
 ## 今後の計画
 
-- Crimson簡易Head Rig化、視線、歩行・走行、座る・寝転ぶ等のキャラクター動作(詳細は`CHARACTER_ANIMATIONS.md`を参照)
+- CrimsonとMetaHuman Body headの追従方式検証、視線、歩行・走行、座る・寝転ぶ等のキャラクター動作(詳細は`CHARACTER_ANIMATIONS.md`を参照)
 - ストーリー展開(詳細は`STORY.md`を参照)
