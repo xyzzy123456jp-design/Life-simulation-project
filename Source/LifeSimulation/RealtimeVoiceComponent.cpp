@@ -125,6 +125,7 @@ void URealtimeVoiceComponent::Disconnect()
 	ClearPendingFunctionCallState();
 	bNextExpressionCallIsAiTest = false;
 	PendingTextExpressionTestRequests = 0;
+	PendingTextGestureTestRequests = 0;
 }
 
 bool URealtimeVoiceComponent::SendTextMessage(const FString& Text)
@@ -154,6 +155,10 @@ bool URealtimeVoiceComponent::SendTextMessage(const FString& Text)
 	if (Text.StartsWith(TEXT("Expression test"), ESearchCase::CaseSensitive))
 	{
 		++PendingTextExpressionTestRequests;
+	}
+	if (Text.StartsWith(TEXT("Gesture test"), ESearchCase::CaseSensitive))
+	{
+		++PendingTextGestureTestRequests;
 	}
 
 	// Starts generation for this new user input. The existing response.create
@@ -434,7 +439,40 @@ void URealtimeVoiceComponent::SendSessionUpdate()
 	TArray<TSharedPtr<FJsonValue>> Tools;
 	Tools.Add(MakeShared<FJsonValueObject>(ExpressEmotionTool));
 
-	const FString ExpressionInstructions = Instructions + GetJenniferExpressionInstructions() + TEXT(
+	TSharedRef<FJsonObject> NodParameters = MakeShared<FJsonObject>();
+	NodParameters->SetStringField(TEXT("type"), TEXT("object"));
+	NodParameters->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+	NodParameters->SetArrayField(TEXT("required"), {});
+	TSharedRef<FJsonObject> NodTool = MakeShared<FJsonObject>();
+	NodTool->SetStringField(TEXT("type"), TEXT("function"));
+	NodTool->SetStringField(TEXT("name"), TEXT("nod_head"));
+	NodTool->SetStringField(TEXT("description"),
+		TEXT("Perform one natural head nod to meaningfully acknowledge, agree with, or confirm what the user said."));
+	NodTool->SetObjectField(TEXT("parameters"), NodParameters);
+	Tools.Add(MakeShared<FJsonValueObject>(NodTool));
+
+	TSharedRef<FJsonObject> GestureProperty = MakeShared<FJsonObject>();
+	GestureProperty->SetStringField(TEXT("type"), TEXT("string"));
+	GestureProperty->SetArrayField(TEXT("enum"), {
+		MakeShared<FJsonValueString>(TEXT("raise_right_arm")),
+		MakeShared<FJsonValueString>(TEXT("wave_right")),
+		MakeShared<FJsonValueString>(TEXT("shrug_right")),
+		MakeShared<FJsonValueString>(TEXT("palm_up_right")) });
+	TSharedRef<FJsonObject> GestureProperties = MakeShared<FJsonObject>();
+	GestureProperties->SetObjectField(TEXT("gesture"), GestureProperty);
+	TSharedRef<FJsonObject> GestureParameters = MakeShared<FJsonObject>();
+	GestureParameters->SetStringField(TEXT("type"), TEXT("object"));
+	GestureParameters->SetObjectField(TEXT("properties"), GestureProperties);
+	GestureParameters->SetArrayField(TEXT("required"), { MakeShared<FJsonValueString>(TEXT("gesture")) });
+	TSharedRef<FJsonObject> GestureTool = MakeShared<FJsonObject>();
+	GestureTool->SetStringField(TEXT("type"), TEXT("function"));
+	GestureTool->SetStringField(TEXT("name"), TEXT("trigger_gesture"));
+	GestureTool->SetStringField(TEXT("description"), TEXT("Perform one brief natural right-arm conversational gesture."));
+	GestureTool->SetObjectField(TEXT("parameters"), GestureParameters);
+	Tools.Add(MakeShared<FJsonValueObject>(GestureTool));
+
+	const FString ExpressionInstructions = Instructions + GetJenniferExpressionInstructions() + GetJenniferNodInstructions()
+		+ GetJenniferHandGestureInstructions() + TEXT(
 		"\n\n"
 		"When a user text input begins with \"Expression test\", this is a hidden\n"
 		"developer test command, not conversational content. Do not explain it.\n"
@@ -460,7 +498,7 @@ void URealtimeVoiceComponent::SendSessionUpdate()
 	Root->SetStringField(TEXT("type"), TEXT("session.update"));
 	Root->SetObjectField(TEXT("session"), Session);
 
-	UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: session voice=%s tools=[express_emotion] modelは接続URLで指定"), *Voice);
+	UE_LOG(LogTemp, Warning, TEXT("RealtimeVoice: session voice=%s tools=[express_emotion,nod_head,trigger_gesture] modelは接続URLで指定"), *Voice);
 	SendJson(Root);
 	UE_LOG(LogTemp, Log, TEXT("RealtimeVoice: session.updateを送信しました"));
 }
@@ -526,6 +564,65 @@ void URealtimeVoiceComponent::HandleFunctionCallArgumentsDone(const TSharedPtr<F
 	JsonObject->TryGetNumberField(TEXT("output_index"), OutputIndexNumber);
 	const int32 OutputIndex = static_cast<int32>(OutputIndexNumber);
 	const FString CompletionKey = MakeFunctionCallCompletionKey(CallId, ItemId, ResponseId, OutputIndex);
+
+	if (FunctionName == TEXT("nod_head"))
+	{
+		if (CallId.IsEmpty())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NOD][REALTIME] エラー: call_idが空"));
+			MarkFunctionCallCompleted(ResponseId, CompletionKey);
+			return;
+		}
+		if (!OnNodRequested.IsBound())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NOD][REALTIME] apply failed: no listener"));
+			SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"target_component_unavailable\"}"));
+		}
+		else
+		{
+			OnNodRequested.Broadcast();
+			UE_LOG(LogTemp, Log, TEXT("[NOD][REALTIME] tool applied call_id=%s"), *CallId);
+			SendFunctionCallOutput(CallId, TEXT("{\"status\":\"applied\"}"));
+		}
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
+
+	if (FunctionName == TEXT("trigger_gesture"))
+	{
+		if (CallId.IsEmpty())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[GESTURE][REALTIME] error: empty call_id"));
+			MarkFunctionCallCompleted(ResponseId, CompletionKey);
+			return;
+		}
+		TSharedPtr<FJsonObject> GestureArgs;
+		const TSharedRef<TJsonReader<>> GestureReader = TJsonReaderFactory<>::Create(ArgumentsJson);
+		FString Gesture;
+		if (!FJsonSerializer::Deserialize(GestureReader, GestureArgs) || !GestureArgs.IsValid())
+		{
+			SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"parse_failed\"}"));
+		}
+		else if (!GestureArgs->TryGetStringField(TEXT("gesture"), Gesture))
+		{
+			SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"missing_argument\"}"));
+		}
+		else if (!HandGestureExecutor)
+		{
+			SendFunctionCallOutput(CallId, TEXT("{\"status\":\"error\",\"reason\":\"gesture_backend_unavailable\"}"));
+		}
+		else
+		{
+			const bool bAiTest = PendingTextGestureTestRequests > 0;
+			if (bAiTest) --PendingTextGestureTestRequests;
+			const FString Output = HandGestureExecutor(Gesture.ToLower(), bAiTest);
+			UE_LOG(LogTemp, Log, TEXT("[GESTURE][%s] tool result gesture=%s call_id=%s output=%s"),
+				bAiTest ? TEXT("AI_TEST") : TEXT("REALTIME"), *Gesture.ToLower(), *CallId, *Output);
+			SendFunctionCallOutput(CallId, Output);
+		}
+		MarkFunctionCallCompleted(ResponseId, CompletionKey);
+		return;
+	}
 
 	if (FunctionName != TEXT("express_emotion"))
 	{

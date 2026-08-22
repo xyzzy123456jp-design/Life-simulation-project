@@ -25,6 +25,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRealtimeUserTranscript, const FSt
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRealtimeAssistantTranscript, const FString&, Text);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRealtimeUserStartedSpeaking);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRealtimeAssistantStartedSpeaking);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRealtimeNodRequested);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRealtimeHandGestureRequested);
 
 /**
  * OpenAI Realtime API(gpt-realtime系)とWebSocketで常時接続し、
@@ -96,6 +98,13 @@ public:
 	// AIが話し始めた時
 	UPROPERTY(BlueprintAssignable, Category = "Realtime")
 	FOnRealtimeAssistantStartedSpeaking OnAssistantStartedSpeaking;
+
+	UPROPERTY(BlueprintAssignable, Category = "Realtime")
+	FOnRealtimeNodRequested OnNodRequested;
+
+	UPROPERTY(BlueprintAssignable, Category = "Realtime")
+	FOnRealtimeHandGestureRequested OnHandGestureRequested;
+	TFunction<FString(const FString&, bool)> HandGestureExecutor;
 
 	// 接続を開始する(マイクキャプチャも同時に開始する)
 	UFUNCTION(BlueprintCallable, Category = "Realtime")
@@ -173,6 +182,7 @@ private:
 	// existing expression application path.
 	bool bNextExpressionCallIsAiTest = false;
 	int32 PendingTextExpressionTestRequests = 0;
+	int32 PendingTextGestureTestRequests = 0;
 
 	// --- マイクキャプチャ(24kHzへダウンサンプリングしつつ送信) ---
 	Audio::FAudioCapture AudioCapture;
