@@ -150,6 +150,74 @@ private:
 	void HandleCycleExpressionTestKeyPressed();
 	int32 DebugExpressionTestCycleIndex = 0;
 
+	enum class ENodPhase : uint8
+	{
+		Idle,
+		NodDown,
+		Hold,
+		Return
+	};
+	UFUNCTION(Exec)
+	void TestNod();
+	UFUNCTION() void HandleLegacyNodRequested();
+	UFUNCTION() void HandleRealtimeNodRequested();
+	void StartNod(const TCHAR* SourceTag);
+	void TickTestNod(float DeltaTime);
+	FString ActiveNodSource = TEXT("MANUAL");
+	ENodPhase NodPhase = ENodPhase::Idle;
+	float NodPhaseElapsed = 0.0f;
+	float CurrentNodPitchDegrees = 0.0f;
+	// Tool Callが省略された明確な同意文だけを補完し、同一応答で二重にうなずかない。
+	bool bNodTriggeredForCurrentAssistantResponse = false;
+	// Crimson FBXのComponent Spaceでは負のX回転が「下を向く」方向。
+	static constexpr float NodTargetPitchDegrees = -7.0f;
+	static constexpr float NodDownDurationSeconds = 0.18f;
+	static constexpr float NodHoldDurationSeconds = 0.06f;
+	static constexpr float NodReturnDurationSeconds = 0.24f;
+
+	// 【手動ジェスチャーv1】MetaHuman BodyのAnimBP最終姿勢へ、右腕の
+	// Component Space加算offsetを適用する。AI連動・自動ループは行わない。
+	enum class EHandGesturePhase : uint8
+	{
+		Idle,
+		Raise,
+		Hold,
+		Lower
+	};
+	void SetupHandGesture();
+	void ResetHandGesture();
+	void HandleBodyBoneTransformsFinalized();
+	void ApplyRightArmGestureOffset(float Alpha);
+	void TickHandGesture(float DeltaTime);
+	float GetActiveHandGestureHoldSeconds() const;
+	UFUNCTION(Exec) void TestGesture();
+	void HandleCycleGestureKeyPressed();
+	void HandleCycleGestureAiTestKeyPressed();
+	UFUNCTION() void HandleRealtimeAssistantStartedSpeaking();
+	FString RequestHandGesture(const FString& GestureId, const TCHAR* SourceTag);
+	void StartHandGestureNow(const FString& GestureId, const FString& SourceTag);
+	void StartPendingHandGestureAtPlayback();
+	FString ActiveHandGestureSource = TEXT("MANUAL");
+	FString PendingHandGestureSource;
+	FString PendingHandGestureId;
+	FString ActiveHandGestureId = TEXT("raise_right_arm");
+	int32 DebugGestureCycleIndex = 0;
+	int32 DebugGestureAiTestCycleIndex = 0;
+	bool bHandGestureTriggeredForCurrentAssistantResponse = false;
+	bool ShouldUseHandGestureFallback(const FString& AssistantText) const;
+	UPROPERTY(Transient) class USkeletalMeshComponent* CachedBodyComponent = nullptr;
+	FDelegateHandle BodyBoneTransformsFinalizedHandle;
+	EHandGesturePhase HandGesturePhase = EHandGesturePhase::Idle;
+	float HandGesturePhaseElapsed = 0.0f;
+	float HandGestureAlpha = 0.0f;
+	static constexpr float HandGestureRaiseSeconds = 0.30f;
+	static constexpr float HandGestureHoldSeconds = 0.24f;
+	static constexpr float HandGestureLowerSeconds = 0.36f;
+	static constexpr float HandGestureUpperArmDegrees = -18.0f;
+	static constexpr float HandGestureLowerArmDegrees = -28.0f;
+	// 14度では前腕の回転に埋もれて見えなかったため、診断可能な角度へ拡大。
+	static constexpr float HandGestureWristDegrees = 35.0f;
+
 	// 【コスト対策】F9キーでRealtime API(音声会話)への接続/切断をトグルする
 	void HandleToggleRealtimeVoiceKeyPressed();
 
@@ -213,6 +281,20 @@ private:
 	// プレイヤー・キャラクターをVRの目の高さ補正込みで指定の位置・向きへ移動させる
 	void TeleportPlayerPawnTo(const FVector& Location, const FRotator& Rotation);
 	void TeleportCharacterActorTo(const FVector& Location, const FRotator& Rotation);
+	FVector ResolveJenniferFaceTarget() const;
+	void CaptureCanonicalConversationFraming();
+	void ApplyConversationSceneExposure(EConversationLocation Location);
+	void RefreshClassroomJenniferLightingAfterMove();
+	void LogConversationCameraDiagnostics(EConversationLocation Location);
+	void LogRenderEnvironmentDiagnostics(EConversationLocation Location) const;
+	void LogCrimsonRenderDiagnostics(EConversationLocation Location) const;
+	void CaptureJenniferCanonicalScale();
+	void RestoreJenniferCanonicalScale(const TCHAR* Context);
+	FVector JenniferCanonicalActorScale = FVector::OneVector;
+	bool bHasJenniferCanonicalActorScale = false;
+	float CanonicalConversationCameraDistanceCm = 270.0f;
+	float CanonicalConversationCameraFOVDegrees = 90.0f;
+	bool bHasCanonicalConversationFraming = false;
 
 	// 【車モード】Paytonを車の助手席位置にアタッチする
 	void AttachCharacterToVehicle();
@@ -256,7 +338,7 @@ private:
 	UPROPERTY()
 	class UStaticMeshComponent* PaytonV9HairComponent = nullptr;
 	UPROPERTY()
-	class USkeletalMeshComponent* CrimsonGazeMorphComponent = nullptr;
+	class UJenniferNodSkeletalMeshComponent* CrimsonGazeMorphComponent = nullptr;
 	UPROPERTY()
 	class UStaticMeshComponent* CrimsonGazeUpperTeethComponent = nullptr;
 
@@ -314,6 +396,13 @@ private:
 	TArray<class UPointLightComponent*> PaytonFillLights;
 	void EnsurePaytonFillLight();
 
+	// Sceneごとの直接光からJenniferを分離し、全会話地点で同じ顔・髪・衣服の
+	// ライティングを使うための専用Lighting Channel 1ライト。
+	UPROPERTY()
+	TArray<class USpotLightComponent*> JenniferConversationLights;
+	void EnsureJenniferConversationLighting();
+	void UpdateJenniferConversationLightingTransform();
+
 	// 部屋モードでは元々照明があるため、車モードの時だけこのライトを点ける
 	void SetPaytonFillLightsEnabled(bool bEnabled);
 
@@ -363,6 +452,32 @@ private:
 
 	// 【診断用】BP_Paytonに追加されているStaticMeshコンポーネントだけを切り替える
 	void HandleDebugToggleAddedStaticMeshVisibility();
+	void HandleToggleScenePointLightDiagnostic();
+	void LogLightingEnvironmentAtJennifer() const;
+	bool bDiagnosticScenePointLightsEnabled = true;
+	void HandleCycleMyRoomLightDiagnostic();
+	void ResetMyRoomLightDiagnostic();
+	TArray<TWeakObjectPtr<class ULightComponent>> DiagnosticMyRoomLights;
+	TWeakObjectPtr<class ULightComponent> DiagnosticMyRoomDisabledLight;
+	int32 DiagnosticMyRoomLightIndex = 0;
+	bool bDiagnosticMyRoomPreviousVisibility = true;
+	void HandleCycleDirectionalLightDiagnostic();
+	void ResetDirectionalLightDiagnostic();
+	TArray<TWeakObjectPtr<class ULightComponent>> DiagnosticDirectionalLights;
+	TWeakObjectPtr<class ULightComponent> DiagnosticDisabledDirectionalLight;
+	int32 DiagnosticDirectionalLightIndex = 0;
+	bool bDiagnosticDirectionalPreviousVisibility = true;
+	void HandleToggleNeutralBackgroundDiagnostic();
+	class AStaticMeshActor* DiagnosticNeutralBackgroundActor = nullptr;
+	bool bDiagnosticNeutralBackgroundEnabled = false;
+	void HandleCycleCrimsonBufferDiagnostic();
+	// -1から開始し、最初のF2で最初の直接光グループ診断を表示する。
+	int32 DiagnosticCrimsonBufferModeIndex = -1;
+	void ResetDirectLightGroupDiagnostic();
+	TArray<TWeakObjectPtr<class ULightComponent>> DiagnosticGroupDisabledLights;
+	void HandleToggleJenniferConversationLightsDiagnostic();
+	void LogJenniferConversationLightingDiagnostics(EConversationLocation Location) const;
+	bool bDiagnosticJenniferKeyLightProbeEnabled = false;
 
 	// 【診断用】MetaHumanの頭髪Groomだけを個別に切り替える
 	void HandleDebugToggleHairVisibility();

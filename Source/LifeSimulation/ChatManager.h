@@ -9,6 +9,8 @@
 class ULipSyncComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChatResponseReceived, const FString&, ResponseText);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnLegacyNodRequested);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnLegacyHandGestureRequested);
 
 UCLASS()
 class LIFESIMULATION_API AChatManager : public AActor
@@ -23,6 +25,14 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Chat")
 	FOnChatResponseReceived OnChatResponseReceived;
+
+	UPROPERTY(BlueprintAssignable, Category = "Chat")
+	FOnLegacyNodRequested OnNodRequested;
+
+	UPROPERTY(BlueprintAssignable, Category = "Chat")
+	FOnLegacyHandGestureRequested OnHandGestureRequested;
+	// Gesture Toolはbusy/backend結果を同期的に返す必要があるため、Actorが設定する共通入口。
+	TFunction<FString(const FString&, bool)> HandGestureExecutor;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chat")
 	FString ApiKey;
@@ -45,6 +55,8 @@ protected:
 	void SendChatRequest();
 	void OnResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
 	FString ExecuteExpressionTool(const FString& ArgumentsJson);
+	FString ExecuteNodTool();
+	FString ExecuteHandGestureTool(const FString& ArgumentsJson);
 	void EnsureSystemMessage();
 	void TrimConversationHistory();
 	void OnTestKeyPressed();

@@ -80,7 +80,8 @@ void AChatManager::EnsureSystemMessage()
 	const FString BaseInstructions = SystemInstructions.IsEmpty()
 		? TEXT("You are Jennifer. Reply naturally in English in 1-3 short spoken-style sentences.")
 		: SystemInstructions;
-	SystemMessageObject->SetStringField(TEXT("content"), BaseInstructions + GetJenniferExpressionInstructions());
+	SystemMessageObject->SetStringField(TEXT("content"), BaseInstructions + GetJenniferExpressionInstructions()
+		+ GetJenniferNodInstructions() + GetJenniferHandGestureInstructions());
 	PendingMessages.Add(MakeShared<FJsonValueObject>(SystemMessageObject));
 }
 
@@ -161,7 +162,44 @@ void AChatManager::SendChatRequest()
 	TSharedRef<FJsonObject> Tool = MakeShared<FJsonObject>();
 	Tool->SetStringField(TEXT("type"), TEXT("function"));
 	Tool->SetObjectField(TEXT("function"), Function);
-	RootObject->SetArrayField(TEXT("tools"), { MakeShared<FJsonValueObject>(Tool) });
+
+	TSharedRef<FJsonObject> NodParameters = MakeShared<FJsonObject>();
+	NodParameters->SetStringField(TEXT("type"), TEXT("object"));
+	NodParameters->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+	NodParameters->SetArrayField(TEXT("required"), {});
+	TSharedRef<FJsonObject> NodFunction = MakeShared<FJsonObject>();
+	NodFunction->SetStringField(TEXT("name"), TEXT("nod_head"));
+	NodFunction->SetStringField(TEXT("description"),
+		TEXT("Perform one natural head nod to meaningfully acknowledge, agree with, or confirm what the user said."));
+	NodFunction->SetObjectField(TEXT("parameters"), NodParameters);
+	TSharedRef<FJsonObject> NodTool = MakeShared<FJsonObject>();
+	NodTool->SetStringField(TEXT("type"), TEXT("function"));
+	NodTool->SetObjectField(TEXT("function"), NodFunction);
+
+	TSharedRef<FJsonObject> GestureProperty = MakeShared<FJsonObject>();
+	GestureProperty->SetStringField(TEXT("type"), TEXT("string"));
+	GestureProperty->SetArrayField(TEXT("enum"), {
+		MakeShared<FJsonValueString>(TEXT("raise_right_arm")),
+		MakeShared<FJsonValueString>(TEXT("wave_right")),
+		MakeShared<FJsonValueString>(TEXT("shrug_right")),
+		MakeShared<FJsonValueString>(TEXT("palm_up_right")) });
+	TSharedRef<FJsonObject> GestureProperties = MakeShared<FJsonObject>();
+	GestureProperties->SetObjectField(TEXT("gesture"), GestureProperty);
+	TSharedRef<FJsonObject> GestureParameters = MakeShared<FJsonObject>();
+	GestureParameters->SetStringField(TEXT("type"), TEXT("object"));
+	GestureParameters->SetObjectField(TEXT("properties"), GestureProperties);
+	GestureParameters->SetArrayField(TEXT("required"), { MakeShared<FJsonValueString>(TEXT("gesture")) });
+	TSharedRef<FJsonObject> GestureFunction = MakeShared<FJsonObject>();
+	GestureFunction->SetStringField(TEXT("name"), TEXT("trigger_gesture"));
+	GestureFunction->SetStringField(TEXT("description"), TEXT("Perform one brief natural right-arm conversational gesture."));
+	GestureFunction->SetObjectField(TEXT("parameters"), GestureParameters);
+	TSharedRef<FJsonObject> GestureTool = MakeShared<FJsonObject>();
+	GestureTool->SetStringField(TEXT("type"), TEXT("function"));
+	GestureTool->SetObjectField(TEXT("function"), GestureFunction);
+	RootObject->SetArrayField(TEXT("tools"), {
+		MakeShared<FJsonValueObject>(Tool),
+		MakeShared<FJsonValueObject>(NodTool),
+		MakeShared<FJsonValueObject>(GestureTool) });
 	RootObject->SetStringField(TEXT("tool_choice"), TEXT("auto"));
 
 	FString RequestBody;
@@ -263,9 +301,23 @@ void AChatManager::OnResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr 
 						}
 					}
 
-					const FString ToolResult = ToolName == TEXT("express_emotion")
-						? ExecuteExpressionTool(ArgumentsJson)
-						: TEXT("{\"status\":\"error\",\"reason\":\"unsupported_function\"}");
+					FString ToolResult;
+					if (ToolName == TEXT("express_emotion"))
+					{
+						ToolResult = ExecuteExpressionTool(ArgumentsJson);
+					}
+					else if (ToolName == TEXT("nod_head"))
+					{
+						ToolResult = ExecuteNodTool();
+					}
+					else if (ToolName == TEXT("trigger_gesture"))
+					{
+						ToolResult = ExecuteHandGestureTool(ArgumentsJson);
+					}
+					else
+					{
+						ToolResult = TEXT("{\"status\":\"error\",\"reason\":\"unsupported_function\"}");
+					}
 					TSharedPtr<FJsonObject> ToolMessage = MakeShared<FJsonObject>();
 					ToolMessage->SetStringField(TEXT("role"), TEXT("tool"));
 					ToolMessage->SetStringField(TEXT("tool_call_id"), ToolCallId);
@@ -381,4 +433,39 @@ FString AChatManager::ExecuteExpressionTool(const FString& ArgumentsJson)
 	return bApplied
 		? TEXT("{\"status\":\"applied\"}")
 		: FString::Printf(TEXT("{\"status\":\"error\",\"reason\":\"%s\"}"), *ErrorReason);
+}
+
+FString AChatManager::ExecuteNodTool()
+{
+	if (!OnNodRequested.IsBound())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NOD][LEGACY] apply failed: no listener"));
+		return TEXT("{\"status\":\"error\",\"reason\":\"target_component_unavailable\"}");
+	}
+
+	OnNodRequested.Broadcast();
+	UE_LOG(LogTemp, Log, TEXT("[NOD][LEGACY] tool applied"));
+	return TEXT("{\"status\":\"applied\"}");
+}
+
+FString AChatManager::ExecuteHandGestureTool(const FString& ArgumentsJson)
+{
+	TSharedPtr<FJsonObject> Arguments;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ArgumentsJson);
+	if (!FJsonSerializer::Deserialize(Reader, Arguments) || !Arguments.IsValid())
+	{
+		return TEXT("{\"status\":\"error\",\"reason\":\"parse_failed\"}");
+	}
+	FString Gesture;
+	if (!Arguments->TryGetStringField(TEXT("gesture"), Gesture))
+	{
+		return TEXT("{\"status\":\"error\",\"reason\":\"missing_argument\"}");
+	}
+	if (!HandGestureExecutor)
+	{
+		return TEXT("{\"status\":\"error\",\"reason\":\"gesture_backend_unavailable\"}");
+	}
+	const FString Result = HandGestureExecutor(Gesture.ToLower(), false);
+	UE_LOG(LogTemp, Log, TEXT("[GESTURE][LEGACY] tool result gesture=%s output=%s"), *Gesture.ToLower(), *Result);
+	return Result;
 }

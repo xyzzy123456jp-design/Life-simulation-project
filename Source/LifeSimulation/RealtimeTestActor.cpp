@@ -17,6 +17,8 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerStart.h"
 #include "Components/PointLightComponent.h"
+#include "Components/SpotLightComponent.h"
+#include "Components/LocalLightComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "ChaosVehicleMovementComponent.h"
 #include "IXRTrackingSystem.h"
@@ -26,13 +28,25 @@
 #include "EnhancedInputComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/PoseableMeshComponent.h"
+#include "JenniferNodSkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/PointLight.h"
+#include "Engine/SpotLight.h"
+#include "Engine/Light.h"
+#include "Engine/SkyLight.h"
+#include "Engine/ReflectionCapture.h"
+#include "Engine/TextureCube.h"
+#include "Engine/PostProcessVolume.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Components/LightComponent.h"
+#include "Components/SkyLightComponent.h"
+#include "Components/ReflectionCaptureComponent.h"
 #include "Engine/TextRenderActor.h"
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
 #if WITH_EDITOR
 #include "Framework/Application/SlateApplication.h"
 #include "Input/Events.h"
@@ -163,15 +177,21 @@ void ARealtimeTestActor::BeginPlay()
 	}
 
 	Super::BeginPlay();
+	CaptureJenniferCanonicalScale();
 
 	// Blueprintと全コンポーネントのBeginPlay後に表示用顔を構築する。以前はSuperより
 	// 前だったため、初回ロード時だけSkeletalMeshの初期化に表示状態を上書きされていた。
 	SetupPaytonNewFace();
+	EnsureJenniferConversationLighting();
+	SetupHandGesture();
 
 	// 非ドライブ地点用カメラは、レベル上の参照や親子関係を引き継がない独立Actorとして
 	// 毎回生成する。これで車両Blueprintに視点を奪われないようにする。
 	if (GetWorld())
 	{
+		const float InitialCameraFOV = IntroFaceCamera && IntroFaceCamera->GetCameraComponent()
+			? IntroFaceCamera->GetCameraComponent()->FieldOfView
+			: 90.0f;
 		const FTransform InitialCameraTransform = IntroFaceCamera
 			? IntroFaceCamera->GetActorTransform()
 			: FTransform(GetActorRotation(), GetActorLocation());
@@ -180,9 +200,18 @@ void ARealtimeTestActor::BeginPlay()
 		if (IntroFaceCamera)
 		{
 			IntroFaceCamera->SetActorLabel(TEXT("LifeSimConversationCamera"));
+			if (UCameraComponent* CameraComponent = IntroFaceCamera->GetCameraComponent())
+			{
+				CameraComponent->SetFieldOfView(InitialCameraFOV);
+			}
+			CanonicalConversationCameraFOVDegrees = InitialCameraFOV;
 			UE_LOG(LogTemp, Warning, TEXT("RealtimeTestActor: 会話地点用カメラをC++で生成しました"));
 		}
 	}
+	UpdateJenniferConversationLightingTransform();
+	// ゲーム開始時のMyRoom表示が正解なので、別シーンへ移る前に実測値を保存する。
+	CaptureCanonicalConversationFraming();
+	ApplyConversationSceneExposure(EConversationLocation::MyRoom);
 
 	// プロジェクトに専用背景がまだ無い5地点は、最低限遊べる簡易セットを自動生成する。
 	// 同じタグの手作り地点が存在する場合は生成せず、後から本格背景へ差し替え可能。
@@ -206,6 +235,12 @@ void ARealtimeTestActor::BeginPlay()
 	RealtimeVoice->OnUserTranscript.AddDynamic(this, &ARealtimeTestActor::HandleUserTranscript);
 	RealtimeVoice->OnAssistantTranscript.AddDynamic(this, &ARealtimeTestActor::HandleAssistantTranscript);
 	RealtimeVoice->OnUserStartedSpeaking.AddDynamic(this, &ARealtimeTestActor::HandleUserStartedSpeaking);
+	RealtimeVoice->OnAssistantStartedSpeaking.AddDynamic(this, &ARealtimeTestActor::HandleRealtimeAssistantStartedSpeaking);
+	RealtimeVoice->OnNodRequested.AddDynamic(this, &ARealtimeTestActor::HandleRealtimeNodRequested);
+	RealtimeVoice->HandGestureExecutor = [this](const FString& GestureId, bool bAiTest)
+	{
+		return RequestHandGesture(GestureId, bAiTest ? TEXT("AI_TEST") : TEXT("REALTIME"));
+	};
 
 	// デフォルトは従来方式。Realtime APIはF9を押した時だけ使用する。
 	LegacyWhisper->ApiKey = RealtimeVoice->ApiKey;
@@ -229,6 +264,11 @@ void ARealtimeTestActor::BeginPlay()
 			LegacyChatManager->SystemInstructions = RealtimeVoice->Instructions;
 			LegacyChatManager->ExpressionComponent = LipSync;
 			LegacyChatManager->OnChatResponseReceived.AddDynamic(this, &ARealtimeTestActor::HandleLegacyChatResponse);
+			LegacyChatManager->OnNodRequested.AddDynamic(this, &ARealtimeTestActor::HandleLegacyNodRequested);
+			LegacyChatManager->HandGestureExecutor = [this](const FString& GestureId, bool)
+			{
+				return RequestHandGesture(GestureId, TEXT("LEGACY"));
+			};
 		}
 	}
 	StartLegacyVoice();
@@ -274,6 +314,14 @@ void ARealtimeTestActor::BeginPlay()
 		InputComponent->BindKey(EKeys::H, IE_Pressed, this, &ARealtimeTestActor::HandleToggleSceneModeKeyPressed);
 		InputComponent->BindKey(EKeys::E, IE_Pressed, this, &ARealtimeTestActor::HandleCycleExpressionKeyPressed);
 		InputComponent->BindKey(EKeys::R, IE_Pressed, this, &ARealtimeTestActor::HandleCycleExpressionTestKeyPressed);
+		InputComponent->BindKey(EKeys::F10, IE_Pressed, this, &ARealtimeTestActor::TestNod);
+		InputComponent->BindKey(EKeys::F2, IE_Pressed, this, &ARealtimeTestActor::HandleCycleCrimsonBufferDiagnostic);
+		InputComponent->BindKey(EKeys::Eight, IE_Pressed, this, &ARealtimeTestActor::HandleToggleJenniferConversationLightsDiagnostic);
+		// F11はUnreal Editorの没入モードと競合するため、未使用の数字0を診断専用にする。
+		InputComponent->BindKey(EKeys::Zero, IE_Pressed, this, &ARealtimeTestActor::HandleToggleNeutralBackgroundDiagnostic);
+		InputComponent->BindKey(EKeys::Z, IE_Pressed, this, &ARealtimeTestActor::TestGesture);
+		InputComponent->BindKey(EKeys::X, IE_Pressed, this, &ARealtimeTestActor::HandleCycleGestureKeyPressed);
+		InputComponent->BindKey(EKeys::C, IE_Pressed, this, &ARealtimeTestActor::HandleCycleGestureAiTestKeyPressed);
 
 		// 【コスト対策】F9キーでRealtime API(音声会話)への接続/切断をトグルする。
 		// 車のEnhanced Input(P/Mキーがハンドブレーキ等と衝突)やVRソフト(F1/F2を横取り)を
@@ -350,6 +398,19 @@ void ARealtimeTestActor::BeginPlay()
 
 void ARealtimeTestActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (DiagnosticNeutralBackgroundActor)
+	{
+		DiagnosticNeutralBackgroundActor->Destroy();
+		DiagnosticNeutralBackgroundActor = nullptr;
+	}
+	ResetDirectLightGroupDiagnostic();
+	if (GetWorld())
+	{
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.SkyLighting 1"));
+	}
+	ResetDirectionalLightDiagnostic();
+	ResetMyRoomLightDiagnostic();
+	ResetHandGesture();
 #if WITH_EDITOR
 	if (FSlateApplication::IsInitialized() && SlatePreInputKeyDownHandle.IsValid())
 	{
@@ -421,6 +482,8 @@ void ARealtimeTestActor::SaveSessionMemory()
 void ARealtimeTestActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	TickTestNod(DeltaTime);
+	TickHandGesture(DeltaTime);
 
 	// パッケージ版ではPlayerControllerが保持しているキー状態を直接確認する。
 	// Editor版はSlate事前通知で処理し、同じ押下による二重切替を避ける。
@@ -709,6 +772,590 @@ void ARealtimeTestActor::HandleCycleExpressionTestKeyPressed()
 	}
 }
 
+void ARealtimeTestActor::TestNod()
+{
+	StartNod(TEXT("MANUAL"));
+}
+
+void ARealtimeTestActor::HandleLegacyNodRequested()
+{
+	StartNod(TEXT("LEGACY"));
+}
+
+void ARealtimeTestActor::HandleRealtimeNodRequested()
+{
+	StartNod(TEXT("REALTIME"));
+}
+
+void ARealtimeTestActor::StartNod(const TCHAR* SourceTag)
+{
+	const FString SafeSourceTag = SourceTag ? SourceTag : TEXT("UNKNOWN");
+	if (SafeSourceTag == TEXT("LEGACY") || SafeSourceTag == TEXT("REALTIME"))
+	{
+		bNodTriggeredForCurrentAssistantResponse = true;
+	}
+	if (!CrimsonGazeMorphComponent || CrimsonGazeMorphComponent->GetBoneIndex(TEXT("head")) == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NOD][%s] start failed: Crimson/head bone unavailable"), *SafeSourceTag);
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(9110, 4.0f, FColor::Red,
+				FString::Printf(TEXT("[NOD][%s] FAILED: head bone unavailable"), *SafeSourceTag), true, FVector2D(1.75f, 1.75f));
+		}
+		return;
+	}
+
+	// 進行中の再トリガーは無視する。途中からの再開始によるBase Poseの
+	// 二重取得・回転蓄積を避け、必ず元姿勢へ戻してから次を受け付ける。
+	if (NodPhase != ENodPhase::Idle)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[NOD][%s] ignored: nod already in progress"), *SafeSourceTag);
+		return;
+	}
+
+	NodPhase = ENodPhase::NodDown;
+	NodPhaseElapsed = 0.0f;
+	CurrentNodPitchDegrees = 0.0f;
+	ActiveNodSource = SafeSourceTag;
+	UE_LOG(LogTemp, Log, TEXT("[NOD][%s] start pitch=%.1f"), *ActiveNodSource, NodTargetPitchDegrees);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9110, 3.0f, FColor::Cyan,
+			FString::Printf(TEXT("[NOD][%s] nod %.1f deg"), *ActiveNodSource, NodTargetPitchDegrees),
+			true, FVector2D(1.75f, 1.75f));
+	}
+}
+
+void ARealtimeTestActor::TickTestNod(float DeltaTime)
+{
+	if (NodPhase == ENodPhase::Idle || !CrimsonGazeMorphComponent)
+	{
+		return;
+	}
+
+	NodPhaseElapsed += DeltaTime;
+	switch (NodPhase)
+	{
+	case ENodPhase::NodDown:
+	{
+		const float Alpha = FMath::Clamp(NodPhaseElapsed / NodDownDurationSeconds, 0.0f, 1.0f);
+		CurrentNodPitchDegrees = FMath::InterpEaseInOut(0.0f, NodTargetPitchDegrees, Alpha, 2.0f);
+		if (Alpha >= 1.0f)
+		{
+			NodPhase = ENodPhase::Hold;
+			NodPhaseElapsed = 0.0f;
+		}
+		break;
+	}
+	case ENodPhase::Hold:
+		CurrentNodPitchDegrees = NodTargetPitchDegrees;
+		if (NodPhaseElapsed >= NodHoldDurationSeconds)
+		{
+			NodPhase = ENodPhase::Return;
+			NodPhaseElapsed = 0.0f;
+		}
+		break;
+	case ENodPhase::Return:
+	{
+		const float Alpha = FMath::Clamp(NodPhaseElapsed / NodReturnDurationSeconds, 0.0f, 1.0f);
+		CurrentNodPitchDegrees = FMath::InterpEaseInOut(NodTargetPitchDegrees, 0.0f, Alpha, 2.0f);
+		if (Alpha >= 1.0f)
+		{
+			CurrentNodPitchDegrees = 0.0f;
+			NodPhase = ENodPhase::Idle;
+			NodPhaseElapsed = 0.0f;
+			UE_LOG(LogTemp, Log, TEXT("[NOD][%s] complete offset=0.0"), *ActiveNodSource);
+		}
+		break;
+	}
+	default:
+		break;
+	}
+
+	CrimsonGazeMorphComponent->SetNodPitchDegrees(CurrentNodPitchDegrees);
+}
+
+void ARealtimeTestActor::SetupHandGesture()
+{
+	ResetHandGesture();
+	if (!CharacterActor)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GESTURE][MANUAL] setup failed: CharacterActor unavailable"));
+		return;
+	}
+
+	TArray<USkeletalMeshComponent*> Components;
+	CharacterActor->GetComponents<USkeletalMeshComponent>(Components);
+	for (USkeletalMeshComponent* Component : Components)
+	{
+		if (Component && Component->GetFName() == TEXT("Body"))
+		{
+			CachedBodyComponent = Component;
+			break;
+		}
+	}
+	if (!CachedBodyComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GESTURE][MANUAL] setup failed: MetaHuman Body component unavailable"));
+		return;
+	}
+
+	for (const FName BoneName : { FName(TEXT("clavicle_r")), FName(TEXT("upperarm_r")),
+		FName(TEXT("lowerarm_r")), FName(TEXT("hand_r")) })
+	{
+		if (CachedBodyComponent->GetBoneIndex(BoneName) == INDEX_NONE)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[GESTURE][MANUAL] setup failed: bone=%s unavailable mesh=%s"),
+				*BoneName.ToString(), CachedBodyComponent->GetSkinnedAsset()
+					? *CachedBodyComponent->GetSkinnedAsset()->GetPathName() : TEXT("None"));
+			CachedBodyComponent = nullptr;
+			return;
+		}
+	}
+
+	// AnimBP/Post Process評価が終わり、描画側が最終姿勢を使う直前にだけoffsetを加える。
+	// Base Poseを保存・復元しないため、Idle Animation等を巻き戻さない。
+	BodyBoneTransformsFinalizedHandle = CachedBodyComponent->RegisterOnBoneTransformsFinalizedDelegate(
+		FOnBoneTransformsFinalizedMultiCast::FDelegate::CreateUObject(
+			this, &ARealtimeTestActor::HandleBodyBoneTransformsFinalized));
+	UE_LOG(LogTemp, Log, TEXT("[GESTURE][MANUAL] ready key=Z body=%s anim=%s bones=clavicle_r/upperarm_r/lowerarm_r/hand_r"),
+		*CachedBodyComponent->GetName(), CachedBodyComponent->GetAnimInstance()
+			? *CachedBodyComponent->GetAnimInstance()->GetClass()->GetPathName() : TEXT("None"));
+}
+
+void ARealtimeTestActor::ResetHandGesture()
+{
+	if (CachedBodyComponent && BodyBoneTransformsFinalizedHandle.IsValid())
+	{
+		CachedBodyComponent->UnregisterOnBoneTransformsFinalizedDelegate(BodyBoneTransformsFinalizedHandle);
+	}
+	BodyBoneTransformsFinalizedHandle.Reset();
+	CachedBodyComponent = nullptr;
+	HandGesturePhase = EHandGesturePhase::Idle;
+	HandGesturePhaseElapsed = 0.0f;
+	HandGestureAlpha = 0.0f;
+	PendingHandGestureSource.Reset();
+	PendingHandGestureId.Reset();
+}
+
+void ARealtimeTestActor::TestGesture()
+{
+	RequestHandGesture(TEXT("raise_right_arm"), TEXT("MANUAL"));
+}
+
+void ARealtimeTestActor::HandleCycleGestureKeyPressed()
+{
+	// 単純な右手上げはZキーで確認できるため、XキーはPhase Cの3種類だけを巡回する。
+	static const TArray<FString> Gestures = {
+		TEXT("wave_right"), TEXT("shrug_right"), TEXT("palm_up_right") };
+	const FString& Gesture = Gestures[DebugGestureCycleIndex % Gestures.Num()];
+	const FString Result = RequestHandGesture(Gesture, TEXT("MANUAL"));
+	if (Result.Contains(TEXT("\"status\":\"applied\"")))
+	{
+		DebugGestureCycleIndex = (DebugGestureCycleIndex + 1) % Gestures.Num();
+	}
+}
+
+float ARealtimeTestActor::GetActiveHandGestureHoldSeconds() const
+{
+	if (ActiveHandGestureId == TEXT("wave_right"))
+	{
+		return 0.85f;
+	}
+	if (ActiveHandGestureId == TEXT("palm_up_right"))
+	{
+		return 0.55f;
+	}
+	if (ActiveHandGestureId == TEXT("shrug_right"))
+	{
+		return 0.40f;
+	}
+	return HandGestureHoldSeconds;
+}
+
+void ARealtimeTestActor::HandleCycleGestureAiTestKeyPressed()
+{
+	static const TArray<FString> Gestures = {
+		TEXT("raise_right_arm"), TEXT("wave_right"), TEXT("shrug_right"), TEXT("palm_up_right") };
+	const FString& Gesture = Gestures[DebugGestureAiTestCycleIndex % Gestures.Num()];
+	const FString Text = FString::Printf(TEXT("Gesture test: %s"), *Gesture);
+	const bool bSent = RealtimeVoice && RealtimeVoice->SendTextMessage(Text);
+	if (bSent)
+	{
+		DebugGestureAiTestCycleIndex = (DebugGestureAiTestCycleIndex + 1) % Gestures.Num();
+	}
+	if (bSent)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GESTURE][AI_TEST] sent text=%s"), *Text);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GESTURE][AI_TEST] send_failed text=%s"), *Text);
+	}
+}
+
+FString ARealtimeTestActor::RequestHandGesture(const FString& GestureId, const TCHAR* SourceTag)
+{
+	const FString SafeSourceTag = SourceTag ? SourceTag : TEXT("UNKNOWN");
+	static const TSet<FString> Supported = {
+		TEXT("raise_right_arm"), TEXT("wave_right"), TEXT("shrug_right"), TEXT("palm_up_right") };
+	const FString NormalizedGesture = GestureId.ToLower();
+	if (!Supported.Contains(NormalizedGesture))
+	{
+		return TEXT("{\"status\":\"error\",\"reason\":\"unknown_gesture\"}");
+	}
+	if (!CachedBodyComponent)
+	{
+		return TEXT("{\"status\":\"error\",\"reason\":\"gesture_backend_unavailable\"}");
+	}
+	if (HandGesturePhase != EHandGesturePhase::Idle || !PendingHandGestureId.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GESTURE][%s] ignored busy requested=%s"), *SafeSourceTag, *NormalizedGesture);
+		return TEXT("{\"status\":\"ignored\",\"reason\":\"gesture_busy\"}");
+	}
+	if (SafeSourceTag == TEXT("LEGACY") || SafeSourceTag == TEXT("REALTIME") || SafeSourceTag == TEXT("AI_TEST"))
+	{
+		bHandGestureTriggeredForCurrentAssistantResponse = true;
+		PendingHandGestureSource = SafeSourceTag;
+		PendingHandGestureId = NormalizedGesture;
+		UE_LOG(LogTemp, Log, TEXT("[GESTURE][%s] queued gesture=%s until assistant playback"),
+			*SafeSourceTag, *NormalizedGesture);
+	}
+	else
+	{
+		StartHandGestureNow(NormalizedGesture, SafeSourceTag);
+	}
+	return FString::Printf(TEXT("{\"status\":\"applied\",\"gesture\":\"%s\"}"), *NormalizedGesture);
+}
+
+void ARealtimeTestActor::StartHandGestureNow(const FString& GestureId, const FString& SourceTag)
+{
+	ActiveHandGestureId = GestureId;
+	ActiveHandGestureSource = SourceTag;
+	HandGesturePhase = EHandGesturePhase::Raise;
+	HandGesturePhaseElapsed = 0.0f;
+	HandGestureAlpha = 0.0f;
+	UE_LOG(LogTemp, Log, TEXT("[GESTURE][%s] start gesture=%s"), *ActiveHandGestureSource, *ActiveHandGestureId);
+	if (ActiveHandGestureId == TEXT("wave_right") && CachedBodyComponent)
+	{
+		const TArray<FTransform>& ComponentTransforms = CachedBodyComponent->GetComponentSpaceTransforms();
+		const USkeletalMesh* BodyMesh = CachedBodyComponent->GetSkeletalMeshAsset();
+		const int32 UpperIndex = CachedBodyComponent->GetBoneIndex(TEXT("upperarm_r"));
+		const int32 HandIndex = CachedBodyComponent->GetBoneIndex(TEXT("hand_r"));
+		if (BodyMesh && ComponentTransforms.IsValidIndex(UpperIndex) && ComponentTransforms.IsValidIndex(HandIndex))
+		{
+			const FReferenceSkeleton& RefSkeleton = BodyMesh->GetRefSkeleton();
+			const int32 UpperParentIndex = RefSkeleton.GetParentIndex(UpperIndex);
+			const int32 HandParentIndex = RefSkeleton.GetParentIndex(HandIndex);
+			if (ComponentTransforms.IsValidIndex(UpperParentIndex) && ComponentTransforms.IsValidIndex(HandParentIndex))
+			{
+				const FTransform UpperLocal = ComponentTransforms[UpperIndex].GetRelativeTransform(ComponentTransforms[UpperParentIndex]);
+				const FTransform HandLocal = ComponentTransforms[HandIndex].GetRelativeTransform(ComponentTransforms[HandParentIndex]);
+				UE_LOG(LogTemp, Log,
+					TEXT("[GESTURE][LOCAL_AXIS] upperarm_r X=%s Y=%s Z=%s hand_r X=%s Y=%s Z=%s"),
+					*UpperLocal.GetRotation().GetAxisX().ToCompactString(),
+					*UpperLocal.GetRotation().GetAxisY().ToCompactString(),
+					*UpperLocal.GetRotation().GetAxisZ().ToCompactString(),
+					*HandLocal.GetRotation().GetAxisX().ToCompactString(),
+					*HandLocal.GetRotation().GetAxisY().ToCompactString(),
+					*HandLocal.GetRotation().GetAxisZ().ToCompactString());
+			}
+		}
+	}
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9120, 3.0f, FColor::Cyan,
+			FString::Printf(TEXT("[GESTURE][%s] %s"), *ActiveHandGestureSource, *ActiveHandGestureId), true, FVector2D(1.75f, 1.75f));
+	}
+}
+
+void ARealtimeTestActor::StartPendingHandGestureAtPlayback()
+{
+	if (PendingHandGestureSource.IsEmpty() || PendingHandGestureId.IsEmpty())
+	{
+		return;
+	}
+	const FString Source = PendingHandGestureSource;
+	const FString Gesture = PendingHandGestureId;
+	PendingHandGestureSource.Reset();
+	PendingHandGestureId.Reset();
+	StartHandGestureNow(Gesture, Source);
+}
+
+void ARealtimeTestActor::HandleRealtimeAssistantStartedSpeaking()
+{
+	StartPendingHandGestureAtPlayback();
+}
+
+void ARealtimeTestActor::TickHandGesture(float DeltaTime)
+{
+	if (HandGesturePhase == EHandGesturePhase::Idle)
+	{
+		return;
+	}
+	HandGesturePhaseElapsed += DeltaTime;
+	switch (HandGesturePhase)
+	{
+	case EHandGesturePhase::Raise:
+	{
+		const float T = FMath::Clamp(HandGesturePhaseElapsed / HandGestureRaiseSeconds, 0.0f, 1.0f);
+		HandGestureAlpha = FMath::InterpEaseInOut(0.0f, 1.0f, T, 2.0f);
+		if (T >= 1.0f)
+		{
+			HandGesturePhase = EHandGesturePhase::Hold;
+			HandGesturePhaseElapsed = 0.0f;
+		}
+		break;
+	}
+	case EHandGesturePhase::Hold:
+		HandGestureAlpha = 1.0f;
+		if (HandGesturePhaseElapsed >= GetActiveHandGestureHoldSeconds())
+		{
+			HandGesturePhase = EHandGesturePhase::Lower;
+			HandGesturePhaseElapsed = 0.0f;
+		}
+		break;
+	case EHandGesturePhase::Lower:
+	{
+		const float T = FMath::Clamp(HandGesturePhaseElapsed / HandGestureLowerSeconds, 0.0f, 1.0f);
+		HandGestureAlpha = FMath::InterpEaseInOut(1.0f, 0.0f, T, 2.0f);
+		if (T >= 1.0f)
+		{
+			HandGestureAlpha = 0.0f;
+			HandGesturePhase = EHandGesturePhase::Idle;
+			HandGesturePhaseElapsed = 0.0f;
+			UE_LOG(LogTemp, Log, TEXT("[GESTURE][%s] complete offset=0.0"), *ActiveHandGestureSource);
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void ARealtimeTestActor::HandleBodyBoneTransformsFinalized()
+{
+	if (CachedBodyComponent && HandGestureAlpha > 0.0001f)
+	{
+		ApplyRightArmGestureOffset(HandGestureAlpha);
+	}
+}
+
+void ARealtimeTestActor::ApplyRightArmGestureOffset(float Alpha)
+{
+	USkeletalMesh* Mesh = CachedBodyComponent ? CachedBodyComponent->GetSkeletalMeshAsset() : nullptr;
+	if (!Mesh)
+	{
+		return;
+	}
+	// Finalized通知はFlip後なので、現在描画に使われるRead Bufferへ限定して加算する。
+	// 次フレームはAnimBPが新しいBase Poseを再評価するため、offsetは蓄積しない。
+	TArray<FTransform>& Transforms = const_cast<TArray<FTransform>&>(CachedBodyComponent->GetComponentSpaceTransforms());
+	const FReferenceSkeleton& RefSkeleton = Mesh->GetRefSkeleton();
+
+	auto RotateSubtree = [&Transforms, &RefSkeleton](int32 ParentIndex, const FQuat& Delta)
+	{
+		if (!Transforms.IsValidIndex(ParentIndex))
+		{
+			return;
+		}
+		const FVector Pivot = Transforms[ParentIndex].GetTranslation();
+		for (int32 BoneIndex = 0; BoneIndex < Transforms.Num(); ++BoneIndex)
+		{
+			if (BoneIndex != ParentIndex && !RefSkeleton.BoneIsChildOf(BoneIndex, ParentIndex))
+			{
+				continue;
+			}
+			FTransform& BoneTransform = Transforms[BoneIndex];
+			BoneTransform.SetTranslation(Pivot + Delta.RotateVector(BoneTransform.GetTranslation() - Pivot));
+			BoneTransform.SetRotation((Delta * BoneTransform.GetRotation()).GetNormalized());
+		}
+	};
+	auto TranslateSubtree = [&Transforms, &RefSkeleton](int32 ParentIndex, const FVector& Delta)
+	{
+		for (int32 BoneIndex = 0; BoneIndex < Transforms.Num(); ++BoneIndex)
+		{
+			if (BoneIndex == ParentIndex || RefSkeleton.BoneIsChildOf(BoneIndex, ParentIndex))
+			{
+				Transforms[BoneIndex].AddToTranslation(Delta);
+			}
+		}
+	};
+
+	const int32 UpperIndex = CachedBodyComponent->GetBoneIndex(TEXT("upperarm_r"));
+	const int32 LowerIndex = CachedBodyComponent->GetBoneIndex(TEXT("lowerarm_r"));
+	const int32 HandIndex = CachedBodyComponent->GetBoneIndex(TEXT("hand_r"));
+	const int32 ClavicleIndex = CachedBodyComponent->GetBoneIndex(TEXT("clavicle_r"));
+
+	if (ActiveHandGestureId == TEXT("shrug_right"))
+	{
+		// 肩を回すだけでは右手上げと見分けにくいため、肩甲帯全体を上へ持ち上げる。
+		TranslateSubtree(ClavicleIndex, FVector(0.0f, 0.0f, 3.5f * Alpha));
+		RotateSubtree(ClavicleIndex, FQuat(FVector::XAxisVector, FMath::DegreesToRadians(-5.0f * Alpha)));
+		return;
+	}
+
+	float UpperDegrees = HandGestureUpperArmDegrees;
+	float LowerDegrees = HandGestureLowerArmDegrees;
+	float WristXDegrees = HandGestureWristDegrees;
+	float UpperForwardDegrees = 0.0f;
+	float HandRollDegrees = 0.0f;
+	bool bAlignWaveUpperArmToFront = false;
+	bool bAlignWaveForearmToFront = false;
+	bool bAlignWavePalmToFront = false;
+	bool bAlignPalmUpPose = false;
+	float WristYDegrees = 0.0f;
+	float WristZDegrees = 0.0f;
+	if (ActiveHandGestureId == TEXT("wave_right"))
+	{
+		// 正常に表示できているraise_right_armを土台にし、肘だけを深く曲げる。
+		// 上腕Xを強く回すと腕が胴体背面へ入り、肩の肌が露出するため使わない。
+		UpperDegrees = 0.0f;
+		LowerDegrees = 0.0f;
+		WristXDegrees = 0.0f;
+		// Component Spaceの固定Euler軸を推測せず、現在の上腕方向を
+		// Jenniferの前上方へ合わせる。
+		bAlignWaveUpperArmToFront = true;
+		bAlignWaveForearmToFront = true;
+		// 掌方向はhand_rの固定Local軸で決めず、指ボーンから実際の掌平面を求める。
+		bAlignWavePalmToFront = true;
+		if (HandGesturePhase == EHandGesturePhase::Hold)
+		{
+			WristZDegrees = FMath::Sin(HandGesturePhaseElapsed * 2.0f * PI * 3.0f) * 28.0f;
+		}
+	}
+	else if (ActiveHandGestureId == TEXT("palm_up_right"))
+	{
+		UpperDegrees = 0.0f;
+		LowerDegrees = 0.0f;
+		WristXDegrees = 0.0f;
+		bAlignPalmUpPose = true;
+	}
+
+	const FTransform BodyComponentTransform = CachedBodyComponent->GetComponentTransform();
+	const FVector BodyForward = CharacterActor
+		? BodyComponentTransform.InverseTransformVectorNoScale(CharacterActor->GetActorForwardVector()).GetSafeNormal()
+		: FVector::ForwardVector;
+	const FVector BodyRight = CharacterActor
+		? BodyComponentTransform.InverseTransformVectorNoScale(CharacterActor->GetActorRightVector()).GetSafeNormal()
+		: FVector::RightVector;
+	const FVector BodyUp = CharacterActor
+		? BodyComponentTransform.InverseTransformVectorNoScale(CharacterActor->GetActorUpVector()).GetSafeNormal()
+		: FVector::UpVector;
+
+	if ((bAlignWaveUpperArmToFront || bAlignPalmUpPose)
+		&& Transforms.IsValidIndex(UpperIndex) && Transforms.IsValidIndex(LowerIndex))
+	{
+		const FVector CurrentUpperDirection =
+			(Transforms[LowerIndex].GetTranslation() - Transforms[UpperIndex].GetTranslation()).GetSafeNormal();
+		// Jennifer Actorの実Forward/Right/UpをBody Component Spaceへ変換した基準で、
+		// 身体の前方・右外側・上方を合成する。
+		const FVector DesiredUpperDirection = bAlignPalmUpPose
+			? (BodyForward * 0.42f + BodyRight * 0.88f + BodyUp * 0.22f).GetSafeNormal()
+			: (BodyForward * 0.25f + BodyRight * 1.00f + BodyUp * 0.45f).GetSafeNormal();
+		const FQuat FullAlignment = FQuat::FindBetweenNormals(CurrentUpperDirection, DesiredUpperDirection);
+		RotateSubtree(UpperIndex, FQuat::Slerp(FQuat::Identity, FullAlignment, Alpha).GetNormalized());
+	}
+	else
+	{
+		RotateSubtree(UpperIndex, FQuat(FVector::XAxisVector, FMath::DegreesToRadians(UpperDegrees * Alpha)));
+	}
+	if (!FMath::IsNearlyZero(UpperForwardDegrees))
+	{
+		RotateSubtree(UpperIndex, FQuat(FVector::ZAxisVector, FMath::DegreesToRadians(UpperForwardDegrees * Alpha)));
+	}
+	if ((bAlignWaveForearmToFront || bAlignPalmUpPose)
+		&& Transforms.IsValidIndex(LowerIndex) && Transforms.IsValidIndex(HandIndex))
+	{
+		// 上腕整列後の実際の前腕方向を使う。固定Component X回転は手を背面へ
+		// 戻していたため廃止し、手が確実に前上方へ来る方向へ直接合わせる。
+		const FVector CurrentForearmDirection =
+			(Transforms[HandIndex].GetTranslation() - Transforms[LowerIndex].GetTranslation()).GetSafeNormal();
+		const FVector DesiredForearmDirection = bAlignPalmUpPose
+			? (BodyForward * 0.62f + BodyRight * 0.18f + BodyUp * 0.10f).GetSafeNormal()
+			: (BodyForward * 0.20f + BodyRight * 0.25f + BodyUp * 0.95f).GetSafeNormal();
+		const FQuat FullForearmAlignment = FQuat::FindBetweenNormals(CurrentForearmDirection, DesiredForearmDirection);
+		RotateSubtree(LowerIndex, FQuat::Slerp(FQuat::Identity, FullForearmAlignment, Alpha).GetNormalized());
+	}
+	else
+	{
+		RotateSubtree(LowerIndex, FQuat(FVector::XAxisVector, FMath::DegreesToRadians(LowerDegrees * Alpha)));
+	}
+	RotateSubtree(HandIndex, FQuat(FVector::XAxisVector, FMath::DegreesToRadians(WristXDegrees * Alpha)));
+	if ((bAlignWavePalmToFront || bAlignPalmUpPose) && Transforms.IsValidIndex(HandIndex))
+	{
+		auto FindFirstBoneIndex = [this](std::initializer_list<const TCHAR*> Names) -> int32
+		{
+			for (const TCHAR* Name : Names)
+			{
+				const int32 Index = CachedBodyComponent->GetBoneIndex(FName(Name));
+				if (Index != INDEX_NONE)
+				{
+					return Index;
+				}
+			}
+			return INDEX_NONE;
+		};
+		const int32 IndexFingerIndex = FindFirstBoneIndex({ TEXT("index_metacarpal_r"), TEXT("index_01_r") });
+		const int32 MiddleFingerIndex = FindFirstBoneIndex({ TEXT("middle_metacarpal_r"), TEXT("middle_01_r") });
+		const int32 PinkyFingerIndex = FindFirstBoneIndex({ TEXT("pinky_metacarpal_r"), TEXT("pinky_01_r") });
+		if (Transforms.IsValidIndex(IndexFingerIndex) && Transforms.IsValidIndex(MiddleFingerIndex)
+			&& Transforms.IsValidIndex(PinkyFingerIndex))
+		{
+			const FVector PalmAcross =
+				(Transforms[PinkyFingerIndex].GetTranslation() - Transforms[IndexFingerIndex].GetTranslation()).GetSafeNormal();
+			const FVector PalmLongitudinal =
+				(Transforms[MiddleFingerIndex].GetTranslation() - Transforms[HandIndex].GetTranslation()).GetSafeNormal();
+			FVector PalmNormal = FVector::CrossProduct(PalmAcross, PalmLongitudinal).GetSafeNormal();
+			const FVector DesiredPalmNormal = bAlignPalmUpPose ? BodyUp : BodyForward;
+			if (bAlignPalmUpPose)
+			{
+				// 実機でCross(PalmAcross, PalmLongitudinal)は手の甲側の法線だった。
+				// palm_upでは表裏を入れ替えた実際の掌側法線をUpへ向ける。
+				PalmNormal *= -1.0f;
+			}
+			else if (FVector::DotProduct(PalmNormal, DesiredPalmNormal) < 0.0f)
+			{
+				PalmNormal *= -1.0f;
+			}
+			const FQuat FullPalmAlignment = FQuat::FindBetweenNormals(PalmNormal, DesiredPalmNormal);
+			RotateSubtree(HandIndex, FQuat::Slerp(FQuat::Identity, FullPalmAlignment, Alpha).GetNormalized());
+			if (bAlignPalmUpPose)
+			{
+				// 実機では法線整列後も掌面が下を向いた。掌平面には表裏の識別情報が
+				// ないため、確認済みの結果に基づき、整列後の手の長手方向を軸に反転する。
+				const FVector AlignedPalmLongitudinal =
+					(Transforms[MiddleFingerIndex].GetTranslation() - Transforms[HandIndex].GetTranslation()).GetSafeNormal();
+				RotateSubtree(HandIndex,
+					FQuat(AlignedPalmLongitudinal, FMath::DegreesToRadians(180.0f * Alpha)));
+			}
+		}
+		else
+		{
+			static bool bLoggedMissingPalmBones = false;
+			if (!bLoggedMissingPalmBones)
+			{
+				bLoggedMissingPalmBones = true;
+				UE_LOG(LogTemp, Warning,
+					TEXT("[GESTURE][WAVE] palm alignment unavailable: finger bones not found"));
+			}
+		}
+	}
+	if (!FMath::IsNearlyZero(HandRollDegrees) && Transforms.IsValidIndex(HandIndex))
+	{
+		const FVector HandLongAxis = Transforms[HandIndex].GetRotation().GetAxisX();
+		RotateSubtree(HandIndex, FQuat(HandLongAxis, FMath::DegreesToRadians(HandRollDegrees * Alpha)));
+	}
+	if (!FMath::IsNearlyZero(WristYDegrees))
+	{
+		RotateSubtree(HandIndex, FQuat(FVector::YAxisVector, FMath::DegreesToRadians(WristYDegrees * Alpha)));
+	}
+	if (!FMath::IsNearlyZero(WristZDegrees))
+	{
+		RotateSubtree(HandIndex, FQuat(BodyUp, FMath::DegreesToRadians(WristZDegrees * Alpha)));
+	}
+}
+
 void ARealtimeTestActor::StartLegacyVoice()
 {
 	if (!GetWorld() || !LegacyMicRecorder || !LegacyWhisper || !LegacyTTS)
@@ -858,6 +1505,7 @@ void ARealtimeTestActor::HandleLegacyChatResponse(const FString& Text)
 
 void ARealtimeTestActor::HandleLegacyTTSStarted()
 {
+	StartPendingHandGestureAtPlayback();
 	UE_LOG(LogTemp, Log, TEXT("[VOICE][LEGACY][TIMELINE] tts_playback_start time=%.3f"),
 		FPlatformTime::Seconds());
 	if (LegacySpeechEndTimeSeconds <= 0.0)
@@ -953,6 +1601,7 @@ void ARealtimeTestActor::TeleportPlayerPawnTo(const FVector& Location, const FRo
 	}
 
 	IntroFaceCamera->SetActorLocationAndRotation(AdjustedLocation, Rotation);
+	UpdateJenniferConversationLightingTransform();
 }
 
 void ARealtimeTestActor::TeleportCharacterActorTo(const FVector& Location, const FRotator& Rotation)
@@ -968,6 +1617,440 @@ void ARealtimeTestActor::TeleportCharacterActorTo(const FVector& Location, const
 		/*bSweep=*/ false,
 		/*OutSweepHitResult=*/ nullptr,
 		ETeleportType::TeleportPhysics);
+	RestoreJenniferCanonicalScale(TEXT("TeleportCharacterActorTo"));
+}
+
+void ARealtimeTestActor::CaptureJenniferCanonicalScale()
+{
+	if (!CharacterActor || bHasJenniferCanonicalActorScale)
+	{
+		return;
+	}
+	JenniferCanonicalActorScale = CharacterActor->GetActorScale3D();
+	bHasJenniferCanonicalActorScale = true;
+	const FBox CharacterBounds = CharacterActor->GetComponentsBoundingBox(/*bNonColliding=*/ true);
+	UE_LOG(LogTemp, Warning,
+		TEXT("[SCENE_SCALE] Jennifer canonical captured actor=%s scale=%s rendered_bounds_height=%.2fcm"),
+		*CharacterActor->GetName(), *JenniferCanonicalActorScale.ToString(), CharacterBounds.GetSize().Z);
+}
+
+void ARealtimeTestActor::RestoreJenniferCanonicalScale(const TCHAR* Context)
+{
+	if (!CharacterActor || !bHasJenniferCanonicalActorScale)
+	{
+		return;
+	}
+	const FVector CurrentScale = CharacterActor->GetActorScale3D();
+	if (!CurrentScale.Equals(JenniferCanonicalActorScale, KINDA_SMALL_NUMBER))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[SCENE_SCALE] Jennifer scale restored context=%s current=%s canonical=%s"),
+			Context ? Context : TEXT("Unknown"), *CurrentScale.ToString(), *JenniferCanonicalActorScale.ToString());
+	}
+	CharacterActor->SetActorScale3D(JenniferCanonicalActorScale);
+}
+
+FVector ARealtimeTestActor::ResolveJenniferFaceTarget() const
+{
+	if (!CharacterActor)
+	{
+		return FVector::ZeroVector;
+	}
+	FVector FaceTarget = CharacterActor->GetActorLocation() + FVector(0.0f, 0.0f, 160.0f);
+	if (OriginalPaytonMorphMesh && OriginalPaytonMorphMesh->IsRegistered())
+	{
+		OriginalPaytonMorphMesh->UpdateBounds();
+		return OriginalPaytonMorphMesh->Bounds.Origin;
+	}
+	const FBox CharacterBounds = CharacterActor->GetComponentsBoundingBox(true);
+	if (CharacterBounds.IsValid)
+	{
+		FaceTarget = FVector(CharacterBounds.GetCenter().X, CharacterBounds.GetCenter().Y,
+			CharacterBounds.Max.Z - FMath::Clamp(CharacterBounds.GetExtent().Z * 0.12f, 10.0f, 30.0f));
+	}
+	return FaceTarget;
+}
+
+void ARealtimeTestActor::CaptureCanonicalConversationFraming()
+{
+	if (!CharacterActor || !IntroFaceCamera)
+	{
+		return;
+	}
+	const FVector FaceTarget = ResolveJenniferFaceTarget();
+	CanonicalConversationCameraDistanceCm = FVector::Distance(IntroFaceCamera->GetActorLocation(), FaceTarget);
+	if (UCameraComponent* CameraComponent = IntroFaceCamera->GetCameraComponent())
+	{
+		// BeginPlayで元のMyRoomカメラからコピーしたFOVをCanonical値として保持する。
+		CameraComponent->SetFieldOfView(CanonicalConversationCameraFOVDegrees);
+	}
+	bHasCanonicalConversationFraming = CanonicalConversationCameraDistanceCm > KINDA_SMALL_NUMBER;
+	UE_LOG(LogTemp, Warning,
+		TEXT("[CAMERA][FRAMING] scene=MyRoom camera=%s face_target=%s distance=%.2fcm fov=%.2f canonical=true"),
+		*IntroFaceCamera->GetActorLocation().ToString(), *FaceTarget.ToString(),
+		CanonicalConversationCameraDistanceCm, CanonicalConversationCameraFOVDegrees);
+}
+
+void ARealtimeTestActor::ApplyConversationSceneExposure(EConversationLocation Location)
+{
+	if (!IntroFaceCamera || !IntroFaceCamera->GetCameraComponent())
+	{
+		return;
+	}
+
+	UCameraComponent* CameraComponent = IntroFaceCamera->GetCameraComponent();
+	const float JenniferLightMultiplier =
+		Location == EConversationLocation::Classroom ? 64.0f : 1.0f;
+	const float JenniferBaseIntensities[] = { 700.0f, 260.0f, 140.0f };
+	const FLinearColor JenniferBaseColors[] =
+	{
+		FLinearColor(1.0f, 0.93f, 0.86f),
+		FLinearColor(0.88f, 0.94f, 1.0f),
+		FLinearColor(1.0f, 0.96f, 0.90f)
+	};
+	for (int32 Index = 0;
+		Index < JenniferConversationLights.Num() && Index < UE_ARRAY_COUNT(JenniferBaseIntensities);
+		++Index)
+	{
+		if (JenniferConversationLights[Index])
+		{
+			USpotLightComponent* Light = JenniferConversationLights[Index];
+			Light->SetVisibility(true);
+			Light->Activate(true);
+			Light->SetIntensity(JenniferBaseIntensities[Index] * JenniferLightMultiplier);
+			Light->SetLightColor(JenniferBaseColors[Index]);
+			Light->SetAttenuationRadius(350.0f);
+			Light->SetInnerConeAngle(35.0f);
+			Light->SetOuterConeAngle(60.0f);
+			Light->MarkRenderStateDirty();
+		}
+	}
+	bDiagnosticJenniferKeyLightProbeEnabled = false;
+	if (CharacterActor)
+	{
+		TInlineComponentArray<UPrimitiveComponent*> JenniferPrimitives(CharacterActor);
+		for (UPrimitiveComponent* Primitive : JenniferPrimitives)
+		{
+			if (Primitive)
+			{
+				Primitive->SetLightingChannels(false, true, false);
+			}
+		}
+	}
+	UE_LOG(LogTemp, Warning,
+		TEXT("[LIGHTING][JENNIFER] scene=%s scene_direct_channel=OFF dedicated_light_multiplier=%.2f"),
+		*GetConversationLocationTagStem(Location), JenniferLightMultiplier);
+	UpdateJenniferConversationLightingTransform();
+
+	if (Location == EConversationLocation::MyRoom)
+	{
+		// AB_MANUAL_ZEROで「すごく良い」と確認されたMyRoomの基準状態を固定する。
+		CameraComponent->PostProcessBlendWeight = 1.0f;
+		CameraComponent->PostProcessSettings.bOverride_AutoExposureMethod = true;
+		CameraComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+		CameraComponent->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure = true;
+		CameraComponent->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure = false;
+		CameraComponent->PostProcessSettings.bOverride_AutoExposureBias = true;
+		CameraComponent->PostProcessSettings.AutoExposureBias = 0.0f;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[LIGHTING][EXPOSURE] scene=MyRoom method=manual physical=false override=true bias=0.00 blend=1.00 canonical=true"));
+		LogJenniferConversationLightingDiagnostics(Location);
+		return;
+	}
+
+	bool bOverrideExposure = false;
+	float ExposureBias = 0.0f;
+	const FConversationSceneConfig SceneConfig =
+		LoadConversationSceneConfig(GetConversationLocationTagStem(Location));
+	bOverrideExposure = SceneConfig.bHasExposureBias;
+	ExposureBias = bOverrideExposure ? SceneConfig.ExposureBias : 0.0f;
+
+	// MyRoomと同じ露出方式を共通条件とし、Scene差はBiasだけで診断する。
+	CameraComponent->PostProcessBlendWeight = 1.0f;
+	CameraComponent->PostProcessSettings.bOverride_AutoExposureMethod = true;
+	CameraComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+	CameraComponent->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure = true;
+	CameraComponent->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure = false;
+	CameraComponent->PostProcessSettings.bOverride_AutoExposureBias = true;
+	CameraComponent->PostProcessSettings.AutoExposureBias = ExposureBias;
+	UE_LOG(LogTemp, Warning,
+		TEXT("[LIGHTING][EXPOSURE] scene=%s method=manual physical=false override=true bias=%.2f blend=1.00 configured_bias=%s"),
+		*GetConversationLocationTagStem(Location),
+		ExposureBias, bOverrideExposure ? TEXT("true") : TEXT("false"));
+	LogJenniferConversationLightingDiagnostics(Location);
+}
+
+void ARealtimeTestActor::RefreshClassroomJenniferLightingAfterMove()
+{
+	if (CurrentConversationLocation != EConversationLocation::Classroom)
+	{
+		return;
+	}
+
+	// Scene移動直後はCamera/Meshの描画状態がまだ更新途中で、専用Spot Lightの
+	// 初回設定が描画へ反映されない。8キー診断の復元と同じ処理を安定後に再適用する。
+	ApplyConversationSceneExposure(EConversationLocation::Classroom);
+	UE_LOG(LogTemp, Warning,
+		TEXT("[LIGHTING][JENNIFER] scene=Classroom delayed_refresh=true delay=0.25"));
+}
+
+void ARealtimeTestActor::LogConversationCameraDiagnostics(EConversationLocation Location)
+{
+	if (!CharacterActor || !IntroFaceCamera)
+	{
+		return;
+	}
+	FBox FaceBounds(ForceInit);
+	if (OriginalPaytonMorphMesh && OriginalPaytonMorphMesh->IsRegistered())
+	{
+		OriginalPaytonMorphMesh->UpdateBounds();
+		FaceBounds = OriginalPaytonMorphMesh->Bounds.GetBox();
+	}
+	else
+	{
+		FaceBounds = CharacterActor->GetComponentsBoundingBox(true);
+	}
+	if (!FaceBounds.IsValid)
+	{
+		return;
+	}
+
+	APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
+	int32 ViewportX = 0;
+	int32 ViewportY = 0;
+	FVector2D ScreenTop;
+	FVector2D ScreenBottom;
+	float ScreenOccupancy = -1.0f;
+	if (PC)
+	{
+		PC->GetViewportSize(ViewportX, ViewportY);
+		const FVector Top(FaceBounds.GetCenter().X, FaceBounds.GetCenter().Y, FaceBounds.Max.Z);
+		const FVector Bottom(FaceBounds.GetCenter().X, FaceBounds.GetCenter().Y, FaceBounds.Min.Z);
+		if (ViewportY > 0 && PC->ProjectWorldLocationToScreen(Top, ScreenTop)
+			&& PC->ProjectWorldLocationToScreen(Bottom, ScreenBottom))
+		{
+			ScreenOccupancy = FMath::Abs(ScreenBottom.Y - ScreenTop.Y) / static_cast<float>(ViewportY);
+		}
+	}
+	const float FOV = IntroFaceCamera->GetCameraComponent()
+		? IntroFaceCamera->GetCameraComponent()->FieldOfView : -1.0f;
+	UE_LOG(LogTemp, Warning,
+		TEXT("[SCENE_CAMERA][PROJECTED] scene=%s actor_scale=%s camera_distance=%.2fcm fov=%.2f face_bounds_height=%.2fcm viewport=%dx%d vertical_occupancy=%.4f"),
+		*GetConversationLocationTagStem(Location), *CharacterActor->GetActorScale3D().ToString(),
+		FVector::Distance(IntroFaceCamera->GetActorLocation(), FaceBounds.GetCenter()), FOV,
+		FaceBounds.GetSize().Z, ViewportX, ViewportY, ScreenOccupancy);
+	UE_LOG(LogTemp, Warning,
+		TEXT("[CAMERA][FRAMING] scene=%s distance=%.2fcm fov=%.2f vertical_occupancy=%.4f"),
+		*GetConversationLocationTagStem(Location),
+		FVector::Distance(IntroFaceCamera->GetActorLocation(), ResolveJenniferFaceTarget()), FOV, ScreenOccupancy);
+	LogRenderEnvironmentDiagnostics(Location);
+	LogCrimsonRenderDiagnostics(Location);
+}
+
+void ARealtimeTestActor::LogRenderEnvironmentDiagnostics(EConversationLocation Location) const
+{
+	if (!GetWorld() || !IntroFaceCamera || !CharacterActor)
+	{
+		return;
+	}
+	const FString Scene = GetConversationLocationTagStem(Location);
+	const FVector CameraLocation = IntroFaceCamera->GetActorLocation();
+	const FVector JenniferLocation = CharacterActor->GetActorLocation();
+	UE_LOG(LogTemp, Warning, TEXT("[RENDER_ENV] scene=%s camera=%s jennifer=%s dynamic_gi=0"),
+		*Scene, *CameraLocation.ToString(), *JenniferLocation.ToString());
+
+	TArray<AActor*> Volumes;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APostProcessVolume::StaticClass(), Volumes);
+	for (AActor* Actor : Volumes)
+	{
+		APostProcessVolume* Volume = Cast<APostProcessVolume>(Actor);
+		if (!Volume)
+		{
+			continue;
+		}
+		float DistanceToPoint = 0.0f;
+		const bool bInside = Volume->bUnbound || Volume->EncompassesPoint(CameraLocation, 0.0f, &DistanceToPoint);
+		const float EffectiveWeight = !bInside ? 0.0f
+			: (Volume->bUnbound || Volume->BlendRadius <= KINDA_SMALL_NUMBER
+				? Volume->BlendWeight
+				: Volume->BlendWeight * FMath::Clamp(1.0f - DistanceToPoint / Volume->BlendRadius, 0.0f, 1.0f));
+		const FPostProcessSettings& S = Volume->Settings;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RENDER_ENV] scene=%s pp_volume=%s inside=%s unbound=%s priority=%.2f blend_weight=%.3f effective_weight=%.3f blend_radius=%.1f distance=%.1f exposure_bias=%.2f exposure_override=%s saturation=%s contrast=%s white_temp=%.1f white_tint=%.2f bloom=%.2f vignette=%.2f ambient_cube=%.2f local_highlight=%.2f local_shadow=%.2f film_slope=%.2f film_toe=%.2f film_shoulder=%.2f"),
+			*Scene, *Volume->GetName(), bInside ? TEXT("true") : TEXT("false"),
+			Volume->bUnbound ? TEXT("true") : TEXT("false"), Volume->Priority,
+			Volume->BlendWeight, EffectiveWeight, Volume->BlendRadius, DistanceToPoint,
+			S.AutoExposureBias, S.bOverride_AutoExposureBias ? TEXT("true") : TEXT("false"),
+			*S.ColorSaturation.ToString(), *S.ColorContrast.ToString(), S.WhiteTemp, S.WhiteTint,
+			S.BloomIntensity, S.VignetteIntensity, S.AmbientCubemapIntensity,
+			S.LocalExposureHighlightContrastScale, S.LocalExposureShadowContrastScale,
+			S.FilmSlope, S.FilmToe, S.FilmShoulder);
+	}
+
+	if (const UCameraComponent* Camera = IntroFaceCamera->GetCameraComponent())
+	{
+		const FPostProcessSettings& S = Camera->PostProcessSettings;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RENDER_ENV] scene=%s camera_pp blend_weight=%.3f exposure_override=%s exposure_bias=%.2f saturation=%s contrast=%s white_temp=%.1f white_tint=%.2f bloom=%.2f vignette=%.2f ambient_cube=%.2f"),
+			*Scene, Camera->PostProcessBlendWeight,
+			S.bOverride_AutoExposureBias ? TEXT("true") : TEXT("false"), S.AutoExposureBias,
+			*S.ColorSaturation.ToString(), *S.ColorContrast.ToString(), S.WhiteTemp, S.WhiteTint,
+			S.BloomIntensity, S.VignetteIntensity, S.AmbientCubemapIntensity);
+	}
+	if (const APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	{
+		if (const APlayerCameraManager* PCM = PC->PlayerCameraManager)
+		{
+			const FMinimalViewInfo& POV = PCM->GetCameraCacheView();
+			const FPostProcessSettings& S = POV.PostProcessSettings;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[RENDER_ENV] scene=%s final_pov location=%s rotation=%s fov=%.2f pp_blend=%.3f exposure=%.2f saturation=%s contrast=%s white_temp=%.1f bloom=%.2f vignette=%.2f ambient_cube=%.2f local_highlight=%.2f local_shadow=%.2f"),
+				*Scene, *POV.Location.ToString(), *POV.Rotation.ToString(), POV.FOV,
+				POV.PostProcessBlendWeight, S.AutoExposureBias, *S.ColorSaturation.ToString(),
+				*S.ColorContrast.ToString(), S.WhiteTemp, S.BloomIntensity, S.VignetteIntensity,
+				S.AmbientCubemapIntensity, S.LocalExposureHighlightContrastScale,
+				S.LocalExposureShadowContrastScale);
+		}
+	}
+
+	TArray<AActor*> SkyLights;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ASkyLight::StaticClass(), SkyLights);
+	for (AActor* Actor : SkyLights)
+	{
+		const ASkyLight* Sky = Cast<ASkyLight>(Actor);
+		const USkyLightComponent* C = Sky ? Sky->GetLightComponent() : nullptr;
+		if (!C) continue;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RENDER_ENV] scene=%s skylight=%s intensity=%.2f visible=%s mobility=%d source=%d cubemap=%s realtime=%s lower_black=%s lower_color=%s"),
+			*Scene, *Sky->GetName(), C->Intensity, C->IsVisible() ? TEXT("true") : TEXT("false"),
+			static_cast<int32>(C->Mobility), static_cast<int32>(C->SourceType),
+			C->Cubemap ? *C->Cubemap->GetPathName() : TEXT("None"),
+			C->bRealTimeCapture ? TEXT("true") : TEXT("false"),
+			C->bLowerHemisphereIsBlack ? TEXT("true") : TEXT("false"),
+			*C->LowerHemisphereColor.ToString());
+	}
+
+	TArray<AActor*> Captures;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AReflectionCapture::StaticClass(), Captures);
+	for (AActor* Actor : Captures)
+	{
+		const AReflectionCapture* Capture = Cast<AReflectionCapture>(Actor);
+		UReflectionCaptureComponent* C = Capture ? Capture->GetCaptureComponent() : nullptr;
+		if (!C) continue;
+		C->UpdateBounds();
+		const FBox Bounds = C->Bounds.GetBox();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RENDER_ENV] scene=%s reflection_capture=%s type=%s camera_inside=%s jennifer_inside=%s distance_camera=%.1f distance_jennifer=%.1f bounds_extent=%s brightness=%.2f"),
+			*Scene, *Capture->GetName(), *Capture->GetClass()->GetName(),
+			Bounds.IsInside(CameraLocation) ? TEXT("true") : TEXT("false"),
+			Bounds.IsInside(JenniferLocation) ? TEXT("true") : TEXT("false"),
+			FVector::Distance(CameraLocation, Capture->GetActorLocation()),
+			FVector::Distance(JenniferLocation, Capture->GetActorLocation()),
+			*Bounds.GetExtent().ToString(), C->Brightness);
+	}
+}
+
+void ARealtimeTestActor::LogCrimsonRenderDiagnostics(EConversationLocation Location) const
+{
+	if ((Location != EConversationLocation::MyRoom && Location != EConversationLocation::Classroom)
+		|| !CrimsonGazeMorphComponent)
+	{
+		return;
+	}
+	const FString Scene = GetConversationLocationTagStem(Location);
+	const FLightingChannels Channels = CrimsonGazeMorphComponent->LightingChannels;
+	const FBoxSphereBounds CrimsonBounds = CrimsonGazeMorphComponent->Bounds;
+	const FVector CameraLocation = IntroFaceCamera ? IntroFaceCamera->GetActorLocation() : FVector::ZeroVector;
+	const float CameraDistance = IntroFaceCamera
+		? FVector::Distance(CameraLocation, CrimsonBounds.Origin) : -1.0f;
+	const float CameraFOV = IntroFaceCamera && IntroFaceCamera->GetCameraComponent()
+		? IntroFaceCamera->GetCameraComponent()->FieldOfView : -1.0f;
+	int32 ViewportX = 0;
+	int32 ViewportY = 0;
+	float ProjectedScreenHeight = -1.0f;
+	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	{
+		PC->GetViewportSize(ViewportX, ViewportY);
+		FVector2D ScreenTop;
+		FVector2D ScreenBottom;
+		const FVector Top = CrimsonBounds.Origin + FVector::UpVector * CrimsonBounds.BoxExtent.Z;
+		const FVector Bottom = CrimsonBounds.Origin - FVector::UpVector * CrimsonBounds.BoxExtent.Z;
+		if (ViewportY > 0 && PC->ProjectWorldLocationToScreen(Top, ScreenTop)
+			&& PC->ProjectWorldLocationToScreen(Bottom, ScreenBottom))
+		{
+			ProjectedScreenHeight = FMath::Abs(ScreenBottom.Y - ScreenTop.Y) / static_cast<float>(ViewportY);
+		}
+	}
+	UE_LOG(LogTemp, Warning,
+		TEXT("[CRIMSON_RENDER] scene=%s component=%s mesh=%s visible=%s hidden_game=%s active=%s cast_shadow=%s receive_decals=%s main_pass=%s custom_depth=%s stencil=%d channels=%d%d%d predicted_lod=%d forced_lod=%d min_lod=%d bounds_origin=%s bounds_radius=%.2f scale=%s materials=%d camera_distance=%.2f fov=%.2f viewport=%dx%d projected_screen_height=%.5f"),
+		*Scene, *CrimsonGazeMorphComponent->GetName(),
+		CrimsonGazeMorphComponent->GetSkeletalMeshAsset() ? *CrimsonGazeMorphComponent->GetSkeletalMeshAsset()->GetPathName() : TEXT("None"),
+		CrimsonGazeMorphComponent->IsVisible() ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->bHiddenInGame ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->IsActive() ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->CastShadow ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->bReceivesDecals ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->bRenderInMainPass ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->bRenderCustomDepth ? TEXT("true") : TEXT("false"),
+		CrimsonGazeMorphComponent->CustomDepthStencilValue,
+		Channels.bChannel0 ? 1 : 0, Channels.bChannel1 ? 1 : 0, Channels.bChannel2 ? 1 : 0,
+		CrimsonGazeMorphComponent->GetPredictedLODLevel(), CrimsonGazeMorphComponent->GetForcedLOD(),
+		CrimsonGazeMorphComponent->MinLodModel, *CrimsonBounds.Origin.ToString(),
+		CrimsonBounds.SphereRadius, *CrimsonGazeMorphComponent->GetComponentScale().ToString(),
+		CrimsonGazeMorphComponent->GetNumMaterials(), CameraDistance, CameraFOV,
+		ViewportX, ViewportY, ProjectedScreenHeight);
+
+	for (int32 Slot = 0; Slot < CrimsonGazeMorphComponent->GetNumMaterials(); ++Slot)
+	{
+		UMaterialInterface* Material = CrimsonGazeMorphComponent->GetMaterial(Slot);
+		const UMaterialInstanceDynamic* Dynamic = Cast<UMaterialInstanceDynamic>(Material);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[CRIMSON_RENDER][MATERIAL] scene=%s slot=%d slot_name=%s material=%s class=%s dynamic=%s blend_mode=%d shading_models=0x%04x two_sided=%s"),
+			*Scene, Slot, *CrimsonGazeMorphComponent->GetMaterialSlotNames()[Slot].ToString(),
+			Material ? *Material->GetPathName() : TEXT("None"), Material ? *Material->GetClass()->GetName() : TEXT("None"),
+			Dynamic ? TEXT("true") : TEXT("false"), Material ? static_cast<int32>(Material->GetBlendMode()) : -1,
+			Material ? Material->GetShadingModels().GetShadingModelField() : 0,
+			Material && Material->IsTwoSided() ? TEXT("true") : TEXT("false"));
+		if (!Material)
+		{
+			continue;
+		}
+
+		TArray<FMaterialParameterInfo> Infos;
+		TArray<FGuid> Ids;
+		Material->GetAllScalarParameterInfo(Infos, Ids);
+		for (const FMaterialParameterInfo& Info : Infos)
+		{
+			float Value = 0.0f;
+			if (Material->GetScalarParameterValue(FHashedMaterialParameterInfo(Info), Value))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CRIMSON_RENDER][PARAM] scene=%s slot=%d type=scalar name=%s value=%.6f"),
+					*Scene, Slot, *Info.Name.ToString(), Value);
+			}
+		}
+		Infos.Reset(); Ids.Reset();
+		Material->GetAllVectorParameterInfo(Infos, Ids);
+		for (const FMaterialParameterInfo& Info : Infos)
+		{
+			FLinearColor Value;
+			if (Material->GetVectorParameterValue(FHashedMaterialParameterInfo(Info), Value))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CRIMSON_RENDER][PARAM] scene=%s slot=%d type=vector name=%s value=%s"),
+					*Scene, Slot, *Info.Name.ToString(), *Value.ToString());
+			}
+		}
+		Infos.Reset(); Ids.Reset();
+		Material->GetAllTextureParameterInfo(Infos, Ids);
+		for (const FMaterialParameterInfo& Info : Infos)
+		{
+			UTexture* Value = nullptr;
+			if (Material->GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CRIMSON_RENDER][PARAM] scene=%s slot=%d type=texture name=%s value=%s"),
+					*Scene, Slot, *Info.Name.ToString(), Value ? *Value->GetPathName() : TEXT("None"));
+			}
+		}
+	}
 }
 
 UCameraComponent* ARealtimeTestActor::FindCameraComponentByName(AActor* Actor, FName ComponentName)
@@ -1318,13 +2401,13 @@ void ARealtimeTestActor::SetupPaytonNewFace()
 
 				// Crimson Gazeは比較表示専用。現在の口パクモデルを通常表示として保持し、F8で切り替える。
 				USkeletalMesh* CrimsonGazeJawMesh = LoadObject<USkeletalMesh>(nullptr,
-					TEXT("/Game/Meshy_Crimson_Gaze_Jaw/SK_Crimson_Gaze_Jaw.SK_Crimson_Gaze_Jaw"));
+					TEXT("/Game/Meshy_Crimson_Gaze_HeadRig/SK_Crimson_Gaze_HeadRig.SK_Crimson_Gaze_HeadRig"));
 				UStaticMesh* CrimsonGazeMesh = CrimsonGazeJawMesh ? nullptr : LoadObject<UStaticMesh>(nullptr,
 					TEXT("/Game/Meshy_Crimson_Gaze/Meshy_AI_Crimson_Gaze_0816095605_texture.Meshy_AI_Crimson_Gaze_0816095605_texture"));
 				UPrimitiveComponent* CrimsonPreviewComponent = nullptr;
 				if (CrimsonGazeJawMesh)
 				{
-					CrimsonGazeMorphComponent = NewObject<USkeletalMeshComponent>(CharacterActor, TEXT("CrimsonGazeMorphComponent"));
+					CrimsonGazeMorphComponent = NewObject<UJenniferNodSkeletalMeshComponent>(CharacterActor, TEXT("CrimsonGazeMorphComponent"));
 					CrimsonGazeMorphComponent->SetSkeletalMesh(CrimsonGazeJawMesh);
 					CrimsonGazeMorphComponent->SetupAttachment(StaticComp->GetAttachParent());
 					CrimsonGazeMorphComponent->SetRelativeTransform(StaticComp->GetRelativeTransform());
@@ -1638,6 +2721,7 @@ void ARealtimeTestActor::AttachCharacterToVehicle()
 	// Paytonのコリジョンが車体・タイヤと干渉して物理演算(走行)を止めてしまうため、
 	// アタッチする前に(1フレームも重ならないうちに)コリジョンを無効化しておく
 	CharacterActor->SetActorEnableCollision(false);
+	RestoreJenniferCanonicalScale(TEXT("AttachCharacterToVehicle"));
 
 	// bWeldSimulatedBodies=falseを明示し、Paytonが車の物理演算に質量として
 	// 溶接されてしまわないようにする(質量が加わると車が正しく動けなくなる)
@@ -1686,6 +2770,113 @@ void ARealtimeTestActor::EnsurePaytonFillLight()
 	}
 }
 
+void ARealtimeTestActor::EnsureJenniferConversationLighting()
+{
+	if (!CharacterActor || !CharacterActor->GetRootComponent())
+	{
+		return;
+	}
+
+	// Jenniferに属する描画コンポーネントだけを専用Channel 1へ移す。
+	// Scene背景は従来どおりChannel 0なので、背景の照明や雰囲気は変化しない。
+	TInlineComponentArray<UPrimitiveComponent*> JenniferPrimitives(CharacterActor);
+	for (UPrimitiveComponent* Primitive : JenniferPrimitives)
+	{
+		if (Primitive)
+		{
+			Primitive->SetLightingChannels(false, true, false);
+		}
+	}
+
+	if (JenniferConversationLights.Num() == 0)
+	{
+		struct FJenniferLightSpec
+		{
+			FVector Offset;
+			float Intensity;
+			FLinearColor Color;
+			bool bCastShadows;
+		};
+
+		// Actorローカルの+Xを正面として、柔らかいKey/Fill/Topの3灯を固定する。
+		// Sceneライトより十分弱くし、陰影を残しながら極端な片影と白飛びを防ぐ。
+		const FJenniferLightSpec Specs[] =
+		{
+			{ FVector(95.0f, -55.0f, 175.0f), 700.0f, FLinearColor(1.0f, 0.93f, 0.86f), true },
+			{ FVector(75.0f,  70.0f, 165.0f), 260.0f, FLinearColor(0.88f, 0.94f, 1.0f), false },
+			{ FVector(-15.0f, 0.0f, 225.0f), 140.0f, FLinearColor(1.0f, 0.96f, 0.90f), false }
+		};
+
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Specs); ++Index)
+		{
+			const FJenniferLightSpec& Spec = Specs[Index];
+			USpotLightComponent* Light = NewObject<USpotLightComponent>(
+				CharacterActor, *FString::Printf(TEXT("JenniferConversationLight%d"), Index));
+			Light->SetMobility(EComponentMobility::Movable);
+			Light->SetIntensity(Spec.Intensity);
+			Light->SetAttenuationRadius(350.0f);
+			Light->SetSourceRadius(22.0f);
+			Light->SetSoftSourceRadius(35.0f);
+			Light->SetInnerConeAngle(35.0f);
+			Light->SetOuterConeAngle(60.0f);
+			Light->SetLightColor(Spec.Color);
+			Light->CastShadows = Spec.bCastShadows;
+			Light->SetLightingChannels(false, true, false);
+			Light->SetupAttachment(CharacterActor->GetRootComponent());
+			Light->RegisterComponent();
+			Light->SetRelativeLocation(Spec.Offset);
+			JenniferConversationLights.Add(Light);
+		}
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[LIGHTING][JENNIFER] isolated_channel=1 primitives=%d dedicated_lights=%d"),
+		JenniferPrimitives.Num(), JenniferConversationLights.Num());
+	UpdateJenniferConversationLightingTransform();
+}
+
+void ARealtimeTestActor::UpdateJenniferConversationLightingTransform()
+{
+	if (!IntroFaceCamera || JenniferConversationLights.Num() < 3)
+	{
+		return;
+	}
+
+	const FVector FaceTarget = ResolveJenniferFaceTarget();
+	FVector TowardCamera = IntroFaceCamera->GetActorLocation() - FaceTarget;
+	if (!TowardCamera.Normalize())
+	{
+		return;
+	}
+	FVector CameraRight = FVector::CrossProduct(FVector::UpVector, TowardCamera);
+	if (!CameraRight.Normalize())
+	{
+		CameraRight = FVector::RightVector;
+	}
+
+	// Actorのローカル軸ではなく、実際の会話カメラを基準に配置する。
+	// これによりSceneごとのJennifer回転に関係なく、Key/Fillが常に顔の正面へ来る。
+	const FVector WorldLocations[] =
+	{
+		FaceTarget + TowardCamera * 75.0f - CameraRight * 45.0f + FVector::UpVector * 20.0f,
+		FaceTarget + TowardCamera * 70.0f + CameraRight * 50.0f + FVector::UpVector * 10.0f,
+		FaceTarget - TowardCamera * 55.0f + CameraRight * 20.0f + FVector::UpVector * 85.0f
+	};
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(WorldLocations); ++Index)
+	{
+		if (JenniferConversationLights[Index])
+		{
+			JenniferConversationLights[Index]->SetWorldLocation(WorldLocations[Index]);
+			JenniferConversationLights[Index]->SetWorldRotation(
+				(FaceTarget - WorldLocations[Index]).Rotation());
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[LIGHTING][JENNIFER] camera_relative face=%s key=%s fill=%s top=%s"),
+		*FaceTarget.ToString(), *WorldLocations[0].ToString(), *WorldLocations[1].ToString(),
+		*WorldLocations[2].ToString());
+}
+
 void ARealtimeTestActor::EnsureCockpitFillLights()
 {
 	if (!VehiclePawn || !VehiclePawn->GetRootComponent())
@@ -1729,6 +2920,584 @@ void ARealtimeTestActor::SetPaytonFillLightsEnabled(bool bEnabled)
 		if (Light)
 		{
 			Light->SetVisibility(bEnabled);
+		}
+	}
+}
+
+void ARealtimeTestActor::HandleToggleScenePointLightDiagnostic()
+{
+	bDiagnosticScenePointLightsEnabled = !bDiagnosticScenePointLightsEnabled;
+	TArray<AActor*> SceneLights;
+	UGameplayStatics::GetAllActorsWithTag(GetWorld(), TEXT("LifeSimJenniferScenePointLight"), SceneLights);
+	for (AActor* Actor : SceneLights)
+	{
+		if (APointLight* PointLight = Cast<APointLight>(Actor))
+		{
+			PointLight->SetActorHiddenInGame(!bDiagnosticScenePointLightsEnabled);
+			if (PointLight->PointLightComponent)
+			{
+				PointLight->PointLightComponent->SetVisibility(bDiagnosticScenePointLightsEnabled);
+			}
+		}
+	}
+	UE_LOG(LogTemp, Warning,
+		TEXT("[LIGHTING][AB] scene=%s generated_scene_point_light=%s count=%d"),
+		*GetConversationLocationTagStem(CurrentConversationLocation),
+		bDiagnosticScenePointLightsEnabled ? TEXT("ON") : TEXT("OFF"), SceneLights.Num());
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9140, 5.0f,
+			bDiagnosticScenePointLightsEnabled ? FColor::Yellow : FColor::Cyan,
+			FString::Printf(TEXT("[LIGHTING A/B] Scene Point Light: %s"),
+				bDiagnosticScenePointLightsEnabled ? TEXT("ON") : TEXT("OFF")),
+			true, FVector2D(1.75f, 1.75f));
+	}
+	LogLightingEnvironmentAtJennifer();
+}
+
+void ARealtimeTestActor::LogLightingEnvironmentAtJennifer() const
+{
+	if (!GetWorld() || !CharacterActor)
+	{
+		return;
+	}
+	const FVector JenniferLocation = CharacterActor->GetActorLocation();
+	TArray<AActor*> Lights;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ALight::StaticClass(), Lights);
+	for (AActor* Actor : Lights)
+	{
+		const ALight* Light = Cast<ALight>(Actor);
+		const ULightComponent* Component = Light ? Light->GetLightComponent() : nullptr;
+		if (!Component)
+		{
+			continue;
+		}
+		const float Distance = FVector::Distance(JenniferLocation, Actor->GetActorLocation());
+		const bool bInfiniteLight = Actor->GetClass()->GetName().Contains(TEXT("Directional"));
+		if (!bInfiniteLight && Distance > 5000.0f)
+		{
+			continue;
+		}
+		UE_LOG(LogTemp, Warning,
+			TEXT("[LIGHTING][ENV] scene=%s type=%s name=%s distance=%.1f intensity=%.2f visible=%s color=%s temperature=%.1f use_temperature=%s"),
+			*GetConversationLocationTagStem(CurrentConversationLocation), *Actor->GetClass()->GetName(),
+			*Actor->GetName(), Distance, Component->Intensity,
+			Component->IsVisible() ? TEXT("true") : TEXT("false"),
+			*Component->GetLightColor().ToString(), Component->Temperature,
+			Component->bUseTemperature ? TEXT("true") : TEXT("false"));
+	}
+
+	TArray<AActor*> SkyLights;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ASkyLight::StaticClass(), SkyLights);
+	for (AActor* Actor : SkyLights)
+	{
+		const ASkyLight* SkyLight = Cast<ASkyLight>(Actor);
+		const USkyLightComponent* Component = SkyLight ? SkyLight->GetLightComponent() : nullptr;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[LIGHTING][ENV] scene=%s type=SkyLight name=%s intensity=%.2f visible=%s mobility=%d"),
+			*GetConversationLocationTagStem(CurrentConversationLocation), *Actor->GetName(),
+			Component ? Component->Intensity : -1.0f,
+			Component && Component->IsVisible() ? TEXT("true") : TEXT("false"),
+			Component ? static_cast<int32>(Component->Mobility) : -1);
+	}
+
+	TArray<AActor*> ReflectionCaptures;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AReflectionCapture::StaticClass(), ReflectionCaptures);
+	for (AActor* Actor : ReflectionCaptures)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[LIGHTING][ENV] scene=%s type=ReflectionCapture name=%s distance=%.1f"),
+			*GetConversationLocationTagStem(CurrentConversationLocation), *Actor->GetName(),
+			FVector::Distance(JenniferLocation, Actor->GetActorLocation()));
+	}
+}
+
+void ARealtimeTestActor::HandleCycleMyRoomLightDiagnostic()
+{
+	if (!GetWorld() || !CharacterActor)
+	{
+		return;
+	}
+
+	if (CurrentConversationLocation != EConversationLocation::MyRoom)
+	{
+		ResetMyRoomLightDiagnostic();
+		UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][MYROOM_AB] unavailable: move to MyRoom first"));
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(9141, 5.0f, FColor::Orange,
+				TEXT("[LIGHTING A/B] Move to MyRoom, then press 0"), true, FVector2D(1.5f, 1.5f));
+		}
+		return;
+	}
+
+	// 前回OFFにした1灯は必ず元の可視状態へ戻してから、次の候補へ進む。
+	if (DiagnosticMyRoomDisabledLight.IsValid())
+	{
+		DiagnosticMyRoomDisabledLight->SetVisibility(bDiagnosticMyRoomPreviousVisibility);
+		UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][MYROOM_AB] restored=%s visible=%s"),
+			*DiagnosticMyRoomDisabledLight->GetOwner()->GetName(),
+			bDiagnosticMyRoomPreviousVisibility ? TEXT("true") : TEXT("false"));
+		DiagnosticMyRoomDisabledLight.Reset();
+	}
+
+	if (DiagnosticMyRoomLights.Num() == 0)
+	{
+		constexpr float DiagnosticRadiusCm = 3000.0f;
+		const FVector JenniferLocation = CharacterActor->GetActorLocation();
+		TArray<AActor*> Lights;
+		UGameplayStatics::GetAllActorsOfClass(GetWorld(), ALight::StaticClass(), Lights);
+		for (AActor* Actor : Lights)
+		{
+			ALight* LightActor = Cast<ALight>(Actor);
+			ULightComponent* LightComponent = LightActor ? LightActor->GetLightComponent() : nullptr;
+			UPointLightComponent* PointComponent = Cast<UPointLightComponent>(LightComponent);
+			if (!PointComponent)
+			{
+				continue;
+			}
+			// 現在のMyRoom描画へ実際に寄与している灯体だけをA/B対象にする。
+			// 非表示ライトを順番に含めると、OFFにしても変化しない診断が混ざる。
+			if (!LightComponent->IsVisible() || Actor->IsHidden())
+			{
+				continue;
+			}
+
+			const float Distance = FVector::Distance(JenniferLocation, Actor->GetActorLocation());
+			if (Distance > DiagnosticRadiusCm)
+			{
+				continue;
+			}
+			DiagnosticMyRoomLights.Add(LightComponent);
+		}
+
+		DiagnosticMyRoomLights.Sort([JenniferLocation](const TWeakObjectPtr<ULightComponent>& A,
+			const TWeakObjectPtr<ULightComponent>& B)
+		{
+			const AActor* OwnerA = A.IsValid() ? A->GetOwner() : nullptr;
+			const AActor* OwnerB = B.IsValid() ? B->GetOwner() : nullptr;
+			const float DistanceA = OwnerA ? FVector::Distance(JenniferLocation, OwnerA->GetActorLocation()) : MAX_flt;
+			const float DistanceB = OwnerB ? FVector::Distance(JenniferLocation, OwnerB->GetActorLocation()) : MAX_flt;
+			return DistanceA < DistanceB;
+		});
+
+		UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][MYROOM_AB] candidates=%d radius=%.0fcm Jennifer=%s"),
+			DiagnosticMyRoomLights.Num(), DiagnosticRadiusCm, *JenniferLocation.ToString());
+		for (int32 Index = 0; Index < DiagnosticMyRoomLights.Num(); ++Index)
+		{
+			ULightComponent* Component = DiagnosticMyRoomLights[Index].Get();
+			UPointLightComponent* Point = Cast<UPointLightComponent>(Component);
+			if (!Component || !Point || !Component->GetOwner())
+			{
+				continue;
+			}
+			const USpotLightComponent* Spot = Cast<USpotLightComponent>(Component);
+			const FLinearColor RawColor = Component->LightColor;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[LIGHTING][MYROOM_LIGHT] index=%d name=%s type=%s distance=%.1f intensity=%.2f color=(%.3f,%.3f,%.3f) use_temperature=%s temperature=%.1f cast_shadow=%s attenuation=%.1f inner_cone=%.1f outer_cone=%.1f mobility=%d visible=%s"),
+				Index + 1, *Component->GetOwner()->GetName(), Spot ? TEXT("Spot") : TEXT("Point"),
+				FVector::Distance(JenniferLocation, Component->GetOwner()->GetActorLocation()), Component->Intensity,
+				RawColor.R, RawColor.G, RawColor.B,
+				Component->bUseTemperature ? TEXT("true") : TEXT("false"), Component->Temperature,
+				Component->CastShadows ? TEXT("true") : TEXT("false"), Point->AttenuationRadius,
+				Spot ? Spot->InnerConeAngle : -1.0f, Spot ? Spot->OuterConeAngle : -1.0f,
+				static_cast<int32>(Component->Mobility), Component->IsVisible() ? TEXT("true") : TEXT("false"));
+		}
+	}
+
+	DiagnosticMyRoomLights.RemoveAll([](const TWeakObjectPtr<ULightComponent>& Light) { return !Light.IsValid(); });
+	if (DiagnosticMyRoomLights.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][MYROOM_AB] no nearby Point/Spot lights found"));
+		return;
+	}
+
+	DiagnosticMyRoomLightIndex %= DiagnosticMyRoomLights.Num();
+	ULightComponent* Selected = DiagnosticMyRoomLights[DiagnosticMyRoomLightIndex].Get();
+	if (!Selected || !Selected->GetOwner())
+	{
+		return;
+	}
+	bDiagnosticMyRoomPreviousVisibility = Selected->IsVisible();
+	DiagnosticMyRoomDisabledLight = Selected;
+	Selected->SetVisibility(false);
+	const FString Message = FString::Printf(TEXT("[LIGHTING A/B] 0 key OFF %d/%d: %s"),
+		DiagnosticMyRoomLightIndex + 1, DiagnosticMyRoomLights.Num(), *Selected->GetOwner()->GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][MYROOM_AB] off_index=%d/%d name=%s previous_visible=%s"),
+		DiagnosticMyRoomLightIndex + 1, DiagnosticMyRoomLights.Num(), *Selected->GetOwner()->GetName(),
+		bDiagnosticMyRoomPreviousVisibility ? TEXT("true") : TEXT("false"));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9141, 8.0f, FColor::Yellow, Message, true, FVector2D(1.5f, 1.5f));
+	}
+	DiagnosticMyRoomLightIndex = (DiagnosticMyRoomLightIndex + 1) % DiagnosticMyRoomLights.Num();
+}
+
+void ARealtimeTestActor::ResetMyRoomLightDiagnostic()
+{
+	if (DiagnosticMyRoomDisabledLight.IsValid())
+	{
+		DiagnosticMyRoomDisabledLight->SetVisibility(bDiagnosticMyRoomPreviousVisibility);
+	}
+	DiagnosticMyRoomDisabledLight.Reset();
+	DiagnosticMyRoomLights.Reset();
+	DiagnosticMyRoomLightIndex = 0;
+	bDiagnosticMyRoomPreviousVisibility = true;
+}
+
+void ARealtimeTestActor::HandleCycleDirectionalLightDiagnostic()
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+	if (DiagnosticDisabledDirectionalLight.IsValid())
+	{
+		DiagnosticDisabledDirectionalLight->SetVisibility(bDiagnosticDirectionalPreviousVisibility);
+		UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][DIRECTIONAL_AB] restored=%s"),
+			*DiagnosticDisabledDirectionalLight->GetOwner()->GetName());
+		DiagnosticDisabledDirectionalLight.Reset();
+	}
+	if (DiagnosticDirectionalLights.Num() == 0)
+	{
+		TArray<AActor*> Lights;
+		UGameplayStatics::GetAllActorsOfClass(GetWorld(), ALight::StaticClass(), Lights);
+		for (AActor* Actor : Lights)
+		{
+			ALight* Light = Cast<ALight>(Actor);
+			ULightComponent* Component = Light ? Light->GetLightComponent() : nullptr;
+			if (Component && Actor->GetClass()->GetName().Contains(TEXT("Directional"))
+				&& Component->IsVisible() && !Actor->IsHidden())
+			{
+				DiagnosticDirectionalLights.Add(Component);
+				UE_LOG(LogTemp, Warning,
+					TEXT("[LIGHTING][DIRECTIONAL] name=%s intensity=%.2f color=%s temperature=%.1f use_temperature=%s rotation=%s cast_shadow=%s mobility=%d"),
+					*Actor->GetName(), Component->Intensity, *Component->GetLightColor().ToString(),
+					Component->Temperature, Component->bUseTemperature ? TEXT("true") : TEXT("false"),
+					*Actor->GetActorRotation().ToString(), Component->CastShadows ? TEXT("true") : TEXT("false"),
+					static_cast<int32>(Component->Mobility));
+			}
+		}
+		DiagnosticDirectionalLights.Sort([](const TWeakObjectPtr<ULightComponent>& A,
+			const TWeakObjectPtr<ULightComponent>& B)
+		{
+			return A.IsValid() && B.IsValid() && A->Intensity > B->Intensity;
+		});
+	}
+	DiagnosticDirectionalLights.RemoveAll([](const TWeakObjectPtr<ULightComponent>& Light) { return !Light.IsValid(); });
+	if (DiagnosticDirectionalLights.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][DIRECTIONAL_AB] no active Directional Lights found"));
+		return;
+	}
+	DiagnosticDirectionalLightIndex %= DiagnosticDirectionalLights.Num();
+	ULightComponent* Selected = DiagnosticDirectionalLights[DiagnosticDirectionalLightIndex].Get();
+	if (!Selected || !Selected->GetOwner())
+	{
+		return;
+	}
+	bDiagnosticDirectionalPreviousVisibility = Selected->IsVisible();
+	DiagnosticDisabledDirectionalLight = Selected;
+	Selected->SetVisibility(false);
+	const FString Message = FString::Printf(TEXT("[LIGHTING A/B] 0 key Directional OFF %d/%d: %s"),
+		DiagnosticDirectionalLightIndex + 1, DiagnosticDirectionalLights.Num(), *Selected->GetOwner()->GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[LIGHTING][DIRECTIONAL_AB] scene=%s off_index=%d/%d name=%s"),
+		*GetConversationLocationTagStem(CurrentConversationLocation), DiagnosticDirectionalLightIndex + 1,
+		DiagnosticDirectionalLights.Num(), *Selected->GetOwner()->GetName());
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9141, 8.0f, FColor::Yellow, Message, true, FVector2D(1.5f, 1.5f));
+	}
+	DiagnosticDirectionalLightIndex = (DiagnosticDirectionalLightIndex + 1) % DiagnosticDirectionalLights.Num();
+}
+
+void ARealtimeTestActor::ResetDirectionalLightDiagnostic()
+{
+	if (DiagnosticDisabledDirectionalLight.IsValid())
+	{
+		DiagnosticDisabledDirectionalLight->SetVisibility(bDiagnosticDirectionalPreviousVisibility);
+	}
+	DiagnosticDisabledDirectionalLight.Reset();
+	DiagnosticDirectionalLights.Reset();
+	DiagnosticDirectionalLightIndex = 0;
+	bDiagnosticDirectionalPreviousVisibility = true;
+}
+
+void ARealtimeTestActor::HandleToggleNeutralBackgroundDiagnostic()
+{
+	if (!GetWorld() || !IntroFaceCamera)
+	{
+		return;
+	}
+
+	if (!DiagnosticNeutralBackgroundActor)
+	{
+		UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		UMaterialInterface* NeutralMaterial = LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/Engine/EngineDebugMaterials/LevelColorationUnlitMaterial.LevelColorationUnlitMaterial"));
+		if (!CubeMesh || !NeutralMaterial)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[BACKGROUND_AB] failed to load diagnostic cube/material"));
+			return;
+		}
+
+		DiagnosticNeutralBackgroundActor = GetWorld()->SpawnActor<AStaticMeshActor>();
+		if (!DiagnosticNeutralBackgroundActor || !DiagnosticNeutralBackgroundActor->GetStaticMeshComponent())
+		{
+			UE_LOG(LogTemp, Error, TEXT("[BACKGROUND_AB] failed to create diagnostic background"));
+			return;
+		}
+		UStaticMeshComponent* Panel = DiagnosticNeutralBackgroundActor->GetStaticMeshComponent();
+		Panel->SetMobility(EComponentMobility::Movable);
+		Panel->SetStaticMesh(CubeMesh);
+		Panel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Panel->SetCastShadow(false);
+		Panel->bReceivesDecals = false;
+		Panel->bRenderCustomDepth = false;
+		Panel->SetLightingChannels(false, false, false);
+		UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(NeutralMaterial, this);
+		if (MID)
+		{
+			MID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.18f, 0.18f, 0.18f, 1.0f));
+			Panel->SetMaterial(0, MID);
+		}
+		DiagnosticNeutralBackgroundActor->AttachToActor(IntroFaceCamera,
+			FAttachmentTransformRules::KeepRelativeTransform);
+		// CameraローカルXが前方。Jennifer(約108cm先)より後ろの250cmへ、
+		// 薄く大きいCubeを置いて画面上の背景だけを覆う。
+		DiagnosticNeutralBackgroundActor->SetActorRelativeLocation(FVector(250.0f, 0.0f, 0.0f));
+		DiagnosticNeutralBackgroundActor->SetActorRelativeRotation(FRotator::ZeroRotator);
+		DiagnosticNeutralBackgroundActor->SetActorRelativeScale3D(FVector(0.05f, 20.0f, 20.0f));
+		DiagnosticNeutralBackgroundActor->SetActorHiddenInGame(true);
+	}
+
+	bDiagnosticNeutralBackgroundEnabled = !bDiagnosticNeutralBackgroundEnabled;
+	DiagnosticNeutralBackgroundActor->SetActorHiddenInGame(!bDiagnosticNeutralBackgroundEnabled);
+	UE_LOG(LogTemp, Warning, TEXT("[BACKGROUND_AB] scene=%s neutral_background=%s color=0.18 camera_relative_location=(250,0,0)"),
+		*GetConversationLocationTagStem(CurrentConversationLocation),
+		bDiagnosticNeutralBackgroundEnabled ? TEXT("ON") : TEXT("OFF"));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9141, 8.0f,
+			bDiagnosticNeutralBackgroundEnabled ? FColor::Silver : FColor::Cyan,
+			FString::Printf(TEXT("[BACKGROUND A/B] Neutral gray: %s"),
+				bDiagnosticNeutralBackgroundEnabled ? TEXT("ON") : TEXT("OFF")),
+			true, FVector2D(1.5f, 1.5f));
+	}
+}
+
+void ARealtimeTestActor::HandleCycleCrimsonBufferDiagnostic()
+{
+	static const TCHAR* Modes[] =
+	{
+		TEXT("AllDirectionalLights_OFF"),
+		TEXT("AllLocalLights_OFF"),
+		TEXT("AllLightComponents_OFF"),
+		TEXT("AllDirectLighting_OFF"),
+		TEXT("FullLit")
+	};
+	constexpr int32 ModeCount = UE_ARRAY_COUNT(Modes);
+	DiagnosticCrimsonBufferModeIndex = (DiagnosticCrimsonBufferModeIndex + 1) % ModeCount;
+	const FString Mode = Modes[DiagnosticCrimsonBufferModeIndex];
+	ResetDirectLightGroupDiagnostic();
+	// 毎回Full Litへ戻し、全寄与をONにしてから対象1項目だけをOFFにする。
+	// 前段階の診断フラグが累積しないことを保証する。
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("r.BufferVisualizationTarget None"));
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("viewmode lit"));
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.DirectLighting 1"));
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.SkyLighting 1"));
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.DynamicShadows 1"));
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.ReflectionEnvironment 1"));
+	UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.AmbientOcclusion 1"));
+	if (Mode == TEXT("AllDirectLighting_OFF"))
+	{
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.DirectLighting 0"));
+	}
+	else if (Mode == TEXT("AllDirectionalLights_OFF") ||
+		Mode == TEXT("AllLocalLights_OFF") ||
+		Mode == TEXT("AllLightComponents_OFF"))
+	{
+		const FVector JenniferTarget = ResolveJenniferFaceTarget();
+		for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!Actor || Actor->IsHidden())
+			{
+				continue;
+			}
+
+			TInlineComponentArray<ULightComponent*> LightComponents(Actor);
+			for (ULightComponent* Component : LightComponents)
+			{
+				if (!Component || !Component->IsVisible())
+				{
+					continue;
+				}
+
+				const ULocalLightComponent* Local = Cast<ULocalLightComponent>(Component);
+				const bool bDirectional = Local == nullptr;
+				bool bSelected = Mode == TEXT("AllLightComponents_OFF") ||
+					(Mode == TEXT("AllDirectionalLights_OFF") && bDirectional);
+				if (Mode == TEXT("AllLocalLights_OFF") && Local)
+				{
+					const float Distance = FVector::Distance(JenniferTarget, Component->GetComponentLocation());
+					bSelected = Distance <= Local->AttenuationRadius;
+				}
+				if (bSelected)
+				{
+					DiagnosticGroupDisabledLights.Add(Component);
+					Component->SetVisibility(false);
+					UE_LOG(LogTemp, Warning,
+						TEXT("[DIRECT_LIGHT_GROUP_AB] mode=%s disabled=%s component=%s type=%s mobility=%d intensity=%.2f"),
+						*Mode, *Actor->GetName(), *Component->GetName(), *Component->GetClass()->GetName(),
+						static_cast<int32>(Component->Mobility), Component->Intensity);
+				}
+			}
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[CRIMSON_BUFFER_AB] scene=%s mode=%s"),
+		*GetConversationLocationTagStem(CurrentConversationLocation), *Mode);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9142, 8.0f, FColor::Green,
+			FString::Printf(TEXT("[CRIMSON BUFFER] F2: %s"), *Mode),
+			true, FVector2D(1.5f, 1.5f));
+	}
+}
+
+void ARealtimeTestActor::ResetDirectLightGroupDiagnostic()
+{
+	for (const TWeakObjectPtr<ULightComponent>& Light : DiagnosticGroupDisabledLights)
+	{
+		if (Light.IsValid())
+		{
+			Light->SetVisibility(true);
+		}
+	}
+	DiagnosticGroupDisabledLights.Reset();
+	if (GetWorld())
+	{
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.DirectLighting 1"));
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.SkyLighting 1"));
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.DynamicShadows 1"));
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.ReflectionEnvironment 1"));
+		UKismetSystemLibrary::ExecuteConsoleCommand(GetWorld(), TEXT("ShowFlag.AmbientOcclusion 1"));
+	}
+}
+
+void ARealtimeTestActor::HandleToggleJenniferConversationLightsDiagnostic()
+{
+	if (!GetWorld() || JenniferConversationLights.Num() == 0)
+	{
+		return;
+	}
+
+	bDiagnosticJenniferKeyLightProbeEnabled = !bDiagnosticJenniferKeyLightProbeEnabled;
+	const FVector FaceTarget = ResolveJenniferFaceTarget();
+	USpotLightComponent* KeyLight = JenniferConversationLights[0];
+	if (bDiagnosticJenniferKeyLightProbeEnabled && KeyLight && IntroFaceCamera)
+	{
+		FVector TowardCamera = IntroFaceCamera->GetActorLocation() - FaceTarget;
+		if (!TowardCamera.Normalize())
+		{
+			TowardCamera = FVector::ForwardVector;
+		}
+		KeyLight->SetVisibility(true);
+		KeyLight->SetIntensity(500000.0f);
+		KeyLight->SetLightColor(FLinearColor(1.0f, 0.0f, 0.35f));
+		KeyLight->SetAttenuationRadius(1200.0f);
+		KeyLight->SetInnerConeAngle(75.0f);
+		KeyLight->SetOuterConeAngle(85.0f);
+		KeyLight->SetWorldLocation(FaceTarget + TowardCamera * 100.0f);
+		KeyLight->SetWorldRotation((FaceTarget - KeyLight->GetComponentLocation()).Rotation());
+		for (int32 Index = 1; Index < JenniferConversationLights.Num(); ++Index)
+		{
+			if (JenniferConversationLights[Index])
+			{
+				JenniferConversationLights[Index]->SetVisibility(false);
+			}
+		}
+	}
+	else
+	{
+		const float Multiplier = CurrentConversationLocation == EConversationLocation::Classroom ? 64.0f : 1.0f;
+		const float BaseIntensities[] = { 700.0f, 260.0f, 140.0f };
+		const FLinearColor BaseColors[] =
+		{
+			FLinearColor(1.0f, 0.93f, 0.86f),
+			FLinearColor(0.88f, 0.94f, 1.0f),
+			FLinearColor(1.0f, 0.96f, 0.90f)
+		};
+		for (int32 Index = 0;
+			Index < JenniferConversationLights.Num() && Index < UE_ARRAY_COUNT(BaseIntensities);
+			++Index)
+		{
+			if (USpotLightComponent* Light = JenniferConversationLights[Index])
+			{
+				Light->SetVisibility(true);
+				Light->SetIntensity(BaseIntensities[Index] * Multiplier);
+				Light->SetLightColor(BaseColors[Index]);
+				Light->SetAttenuationRadius(350.0f);
+				Light->SetInnerConeAngle(35.0f);
+				Light->SetOuterConeAngle(60.0f);
+			}
+		}
+		UpdateJenniferConversationLightingTransform();
+	}
+	LogJenniferConversationLightingDiagnostics(CurrentConversationLocation);
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9143, 8.0f,
+			bDiagnosticJenniferKeyLightProbeEnabled ? FColor::Magenta : FColor::Cyan,
+			FString::Printf(TEXT("[JENNIFER LIGHT PROBE] 8: %s"),
+				bDiagnosticJenniferKeyLightProbeEnabled ? TEXT("MAGENTA KEY") : TEXT("RESTORED")),
+			true, FVector2D(1.5f, 1.5f));
+	}
+}
+
+void ARealtimeTestActor::LogJenniferConversationLightingDiagnostics(EConversationLocation Location) const
+{
+	const FString Scene = GetConversationLocationTagStem(Location);
+	const FVector FaceTarget = ResolveJenniferFaceTarget();
+	for (int32 Index = 0; Index < JenniferConversationLights.Num(); ++Index)
+	{
+		const USpotLightComponent* Light = JenniferConversationLights[Index];
+		if (!Light)
+		{
+			continue;
+		}
+		const FVector ToFace = (FaceTarget - Light->GetComponentLocation()).GetSafeNormal();
+		const float AngleDegrees = FMath::RadiansToDegrees(
+			FMath::Acos(FMath::Clamp(FVector::DotProduct(Light->GetForwardVector(), ToFace), -1.0f, 1.0f)));
+		const FLightingChannels Channels = Light->LightingChannels;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[JENNIFER_LIGHT_RUNTIME] scene=%s name=%s visible=%s active=%s mobility=%d intensity=%.2f color=%s radius=%.2f inner=%.2f outer=%.2f location=%s rotation=%s face_distance=%.2f face_angle=%.2f inside_cone=%s channels=%d%d%d"),
+			*Scene, *Light->GetName(), Light->IsVisible() ? TEXT("true") : TEXT("false"),
+			Light->IsActive() ? TEXT("true") : TEXT("false"), static_cast<int32>(Light->Mobility),
+			Light->Intensity, *Light->GetLightColor().ToString(), Light->AttenuationRadius,
+			Light->InnerConeAngle, Light->OuterConeAngle, *Light->GetComponentLocation().ToString(),
+			*Light->GetComponentRotation().ToString(), FVector::Distance(Light->GetComponentLocation(), FaceTarget),
+			AngleDegrees, AngleDegrees <= Light->OuterConeAngle ? TEXT("true") : TEXT("false"),
+			Channels.bChannel0 ? 1 : 0, Channels.bChannel1 ? 1 : 0, Channels.bChannel2 ? 1 : 0);
+	}
+	if (CharacterActor)
+	{
+		TInlineComponentArray<UPrimitiveComponent*> Primitives(CharacterActor);
+		for (const UPrimitiveComponent* Primitive : Primitives)
+		{
+			if (!Primitive)
+			{
+				continue;
+			}
+			const FLightingChannels Channels = Primitive->LightingChannels;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[JENNIFER_PRIMITIVE_RUNTIME] scene=%s name=%s class=%s channels=%d%d%d visible=%s hidden=%s cast_shadow=%s"),
+				*Scene, *Primitive->GetName(), *Primitive->GetClass()->GetName(),
+				Channels.bChannel0 ? 1 : 0, Channels.bChannel1 ? 1 : 0, Channels.bChannel2 ? 1 : 0,
+				Primitive->IsVisible() ? TEXT("true") : TEXT("false"),
+				Primitive->bHiddenInGame ? TEXT("true") : TEXT("false"),
+				Primitive->CastShadow ? TEXT("true") : TEXT("false"));
 		}
 	}
 }
@@ -2525,6 +4294,10 @@ void ARealtimeTestActor::HandleToggleSceneModeKeyPressed()
 		}
 		TeleportCharacterActorTo(RoomCharacterSeat->GetActorLocation(), RoomCharacterSeat->GetActorRotation());
 		TeleportPlayerPawnTo(RoomPlayerSeat->GetActorLocation(), RoomPlayerSeat->GetActorRotation());
+		// MyRoomの正常な構図をCanonical Framingとする。別シーンで変更されたFOVも
+		// 必ず元カメラ由来のMyRoom FOVへ戻す。
+		CaptureCanonicalConversationFraming();
+		ApplyConversationSceneExposure(EConversationLocation::MyRoom);
 		SetPaytonFillLightsEnabled(false);
 
 		if (PC && IntroFaceCamera)
@@ -2638,6 +4411,11 @@ void ARealtimeTestActor::HandleError(const FString& ErrorMessage)
 
 void ARealtimeTestActor::HandleUserTranscript(const FString& Text)
 {
+	bNodTriggeredForCurrentAssistantResponse = false;
+	bHandGestureTriggeredForCurrentAssistantResponse = false;
+	// 前ターンで音声生成前に失敗・中断した予約を次の返答へ持ち越さない。
+	PendingHandGestureSource.Reset();
+	PendingHandGestureId.Reset();
 	UE_LOG(LogTemp, Log, TEXT("RealtimeTestActor: You: %s"), *Text);
 	SessionTranscriptLog.Add(FString::Printf(TEXT("Hiro: %s"), *Text));
 
@@ -2668,6 +4446,29 @@ void ARealtimeTestActor::HandleAssistantTranscript(const FString& Text)
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Yellow, FString::Printf(TEXT("AI: %s"), *Text), true, FVector2D(1.25f, 1.25f));
+	}
+
+	// tool_choice=autoでは、モデルが明確に同意していても文章だけを返し、
+	// nod_headを省略する場合がある。Function Callingを第一経路としつつ、
+	// 既存の厳格な同意判定を満たした場合だけ一度補完する。
+	if (!bNodTriggeredForCurrentAssistantResponse && IsJenniferAgreement(Text))
+	{
+		const TCHAR* SourceTag = RealtimeVoice && RealtimeVoice->IsConnected()
+			? TEXT("REALTIME_FALLBACK")
+			: TEXT("LEGACY_FALLBACK");
+		StartNod(SourceTag);
+		bNodTriggeredForCurrentAssistantResponse = true;
+		UE_LOG(LogTemp, Log, TEXT("[NOD][%s] explicit agreement fallback text=%s"), SourceTag, *Text);
+	}
+
+	if (!bHandGestureTriggeredForCurrentAssistantResponse && ShouldUseHandGestureFallback(Text))
+	{
+		const TCHAR* SourceTag = RealtimeVoice && RealtimeVoice->IsConnected()
+			? TEXT("REALTIME_FALLBACK")
+			: TEXT("LEGACY_FALLBACK");
+		RequestHandGesture(TEXT("raise_right_arm"), SourceTag);
+		bHandGestureTriggeredForCurrentAssistantResponse = true;
+		UE_LOG(LogTemp, Log, TEXT("[GESTURE][%s] semantic fallback text=%s"), SourceTag, *Text);
 	}
 
 	if (PendingProposedLocation != EConversationLocation::None)
@@ -2756,6 +4557,20 @@ bool ARealtimeTestActor::IsJenniferAgreement(const FString& AssistantText) const
 		|| T.Contains(TEXT("賛成")) || T.Contains(TEXT("いいね")) || T.Contains(TEXT("もちろん"))
 		|| T.Contains(TEXT("喜んで")) || T.Contains(TEXT("行きたい")) || T.Contains(TEXT("うん"))
 		|| T.Contains(TEXT("オッケー")) || T.Contains(TEXT("オーケー"));
+}
+
+bool ARealtimeTestActor::ShouldUseHandGestureFallback(const FString& AssistantText) const
+{
+	const FString T = AssistantText.ToLower();
+	// tool_choice=autoが省略した場合の限定的な補完。説明の根拠、温かい反応、
+	// 重要事項の受領が文面へ明示された場合だけ対象にする。
+	return T.Contains(TEXT(" because ")) || T.StartsWith(TEXT("because "))
+		|| T.Contains(TEXT("for example")) || T.Contains(TEXT("the reason"))
+		|| T.Contains(TEXT("important")) || T.Contains(TEXT("valuable"))
+		|| T.Contains(TEXT("wonderful to hear")) || T.Contains(TEXT("great to hear"))
+		|| T.Contains(TEXT("glad to")) || T.Contains(TEXT("happy to"))
+		|| T.Contains(TEXT("thank you")) || T.Contains(TEXT("you're welcome"))
+		|| T.Contains(TEXT("i understand how")) || T.Contains(TEXT("i'll remember"));
 }
 
 FString ARealtimeTestActor::GetConversationLocationTagStem(EConversationLocation Location)
@@ -3007,7 +4822,9 @@ void ARealtimeTestActor::BuildFallbackConversationScene(EConversationLocation Lo
 	}
 	EnsureMovableAnchorRoot(JenniferAnchor);
 	JenniferAnchor->SetActorLocationAndRotation(JenniferLocation, SceneConfig.JenniferRotation);
-	JenniferAnchor->SetActorScale3D(SceneConfig.JenniferScale);
+	// Jenniferの実サイズはシーンによって変えない。旧ini値は読み込み互換のため
+	// 残すが、背景との比率調整にはBackgroundScaleだけを使用する。
+	JenniferAnchor->SetActorScale3D(FVector::OneVector);
 	if (!PlayerAnchor || !JenniferAnchor)
 	{
 		return;
@@ -3036,6 +4853,7 @@ void ARealtimeTestActor::BuildFallbackConversationScene(EConversationLocation Lo
 	if (SceneLight && SceneLight->PointLightComponent)
 	{
 		SceneLight->Tags.AddUnique(RuntimeSceneTag);
+		SceneLight->Tags.AddUnique(TEXT("LifeSimJenniferScenePointLight"));
 		SceneLight->PointLightComponent->SetMobility(EComponentMobility::Movable);
 		float SceneLightIntensity = 5200.0f;
 		switch (Location)
@@ -3052,6 +4870,8 @@ void ARealtimeTestActor::BuildFallbackConversationScene(EConversationLocation Lo
 		SceneLight->PointLightComponent->SetLightColor(Location == EConversationLocation::JenniferRoom
 			? FLinearColor(1.0f, 0.72f, 0.78f) : FLinearColor(1.0f, 0.90f, 0.75f));
 		SceneLight->PointLightComponent->CastShadows = false;
+		SceneLight->SetActorHiddenInGame(!bDiagnosticScenePointLightsEnabled);
+		SceneLight->PointLightComponent->SetVisibility(bDiagnosticScenePointLightsEnabled);
 	}
 
 	// 場所名を目の前に表示して、簡易セットでも現在地を識別できるようにする。
@@ -3226,6 +5046,9 @@ void ARealtimeTestActor::CheckPendingLocationMove()
 
 void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Location)
 {
+	ResetDirectLightGroupDiagnostic();
+	ResetDirectionalLightDiagnostic();
+	ResetMyRoomLightDiagnostic();
 	// 同じ場所のキーを再度押した場合も、位置とカメラを再適用する。
 
 	if (Location == EConversationLocation::MyRoom)
@@ -3242,6 +5065,8 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 		}
 		TeleportCharacterActorTo(RoomCharacterSeat->GetActorLocation(), RoomCharacterSeat->GetActorRotation());
 		TeleportPlayerPawnTo(RoomPlayerSeat->GetActorLocation(), RoomPlayerSeat->GetActorRotation());
+		CaptureCanonicalConversationFraming();
+		ApplyConversationSceneExposure(EConversationLocation::MyRoom);
 		bIsInRoomMode = true;
 		if (VehiclePawn)
 		{
@@ -3257,6 +5082,8 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 			}
 		}
 		CurrentConversationLocation = Location;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateUObject(
+			this, &ARealtimeTestActor::LogConversationCameraDiagnostics, Location));
 		UE_LOG(LogTemp, Log, TEXT("RealtimeTestActor: 会話により自分の部屋へ移動しました"));
 		return;
 	}
@@ -3320,42 +5147,42 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 		CharacterActor->SetActorEnableCollision(true);
 	}
 	TeleportCharacterActorTo(JenniferAnchor->GetActorLocation(), JenniferAnchor->GetActorRotation());
-	if (CharacterActor)
-	{
-		// TeleportCharacterActorToは位置・回転のみ反映するため、ini側のJenniferScaleを
-		// 実際のキャラクターにも適用する(JenniferAnchor自体には既に反映済み)
-		CharacterActor->SetActorScale3D(JenniferAnchor->GetActorScale3D());
-	}
+	RestoreJenniferCanonicalScale(TEXT("TryMoveToConversationLocation"));
 	TeleportPlayerPawnTo(PlayerAnchor->GetActorLocation(), PlayerAnchor->GetActorRotation());
 	if (IntroFaceCamera && CharacterActor)
 	{
 		// 固定Z値ではなく、実際に描画しているMeshy顔のWorld Boundsを使う。
 		// これにより、キャラクター原点やメッシュ固有オフセットが変わっても
 		// カメラが胴体内部・床下へ入らず、顔と同じ高さから正面を映せる。
-		FVector FaceTarget = CharacterActor->GetActorLocation() + FVector(0.0f, 0.0f, 160.0f);
-		if (OriginalPaytonMorphMesh && OriginalPaytonMorphMesh->IsRegistered())
-		{
-			OriginalPaytonMorphMesh->UpdateBounds();
-			FaceTarget = OriginalPaytonMorphMesh->Bounds.Origin;
-		}
-		else
-		{
-			const FBox CharacterBounds = CharacterActor->GetComponentsBoundingBox(true);
-			if (CharacterBounds.IsValid)
-			{
-				FaceTarget = FVector(
-					CharacterBounds.GetCenter().X,
-					CharacterBounds.GetCenter().Y,
-					CharacterBounds.Max.Z - FMath::Clamp(CharacterBounds.GetExtent().Z * 0.12f, 10.0f, 30.0f));
-			}
-		}
+		const FVector FaceTarget = ResolveJenniferFaceTarget();
+		const float CanonicalDistance = bHasCanonicalConversationFraming
+			? CanonicalConversationCameraDistanceCm : 270.0f;
 
 		const FConversationSceneConfig SceneConfig = LoadConversationSceneConfig(GetConversationLocationTagStem(Location));
 		FVector CameraLocation;
 		FRotator CameraRotation;
 		if (SceneConfig.bHasCameraOffset)
 		{
-			CameraLocation = FaceTarget + SceneConfig.CameraOffset;
+			const float ConfiguredDistance = SceneConfig.CameraOffset.Size();
+			UE_LOG(LogTemp, Warning,
+				TEXT("[SCENE_CAMERA][BEFORE_CONFIG] scene=%s actor_scale=%s configured_distance=%.2fcm configured_fov=%.2f offset=%s"),
+				*GetConversationLocationTagStem(Location), *CharacterActor->GetActorScale3D().ToString(),
+				ConfiguredDistance, SceneConfig.CameraFOV, *SceneConfig.CameraOffset.ToString());
+
+			// 各シーンのZは上下構図として残すが、顔までの実距離とFOVは共通化する。
+			const float VerticalOffset = FMath::Clamp(SceneConfig.CameraOffset.Z,
+				-CanonicalDistance * 0.8f, CanonicalDistance * 0.8f);
+			FVector HorizontalDirection(SceneConfig.CameraOffset.X, SceneConfig.CameraOffset.Y, 0.0f);
+			if (!HorizontalDirection.Normalize())
+			{
+				HorizontalDirection = -CharacterActor->GetActorForwardVector();
+				HorizontalDirection.Z = 0.0f;
+				HorizontalDirection.Normalize();
+			}
+			const float HorizontalDistance = FMath::Sqrt(FMath::Max(0.0f,
+				FMath::Square(CanonicalDistance) - FMath::Square(VerticalOffset)));
+			CameraLocation = FaceTarget + HorizontalDirection * HorizontalDistance
+				+ FVector::UpVector * VerticalOffset;
 			CameraRotation = SceneConfig.bHasCameraRotation
 				? SceneConfig.CameraRotation
 				: (FaceTarget - CameraLocation).Rotation();
@@ -3370,22 +5197,21 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 				ViewDirection.Z = 0.0f;
 				ViewDirection.Normalize();
 			}
-			CameraLocation = FaceTarget + ViewDirection * 190.0f;
+			CameraLocation = FaceTarget + ViewDirection * CanonicalDistance;
 			CameraRotation = (FaceTarget - CameraLocation).Rotation();
 		}
 		TeleportPlayerPawnTo(CameraLocation, CameraRotation);
 		if (UCameraComponent* LocationCameraComponent = IntroFaceCamera->GetCameraComponent())
 		{
-			LocationCameraComponent->SetFieldOfView(SceneConfig.CameraFOV);
-			// 自動露出がライトの強弱を打ち消してしまうため、場所ごとの明るさはここで直接指定する
-			LocationCameraComponent->PostProcessSettings.bOverride_AutoExposureBias = SceneConfig.bHasExposureBias;
-			if (SceneConfig.bHasExposureBias)
-			{
-				LocationCameraComponent->PostProcessSettings.AutoExposureBias = SceneConfig.ExposureBias;
-			}
+			LocationCameraComponent->SetFieldOfView(CanonicalConversationCameraFOVDegrees);
 		}
+		ApplyConversationSceneExposure(Location);
 		UE_LOG(LogTemp, Warning, TEXT("RealtimeTestActor: 場所カメラ FaceTarget=%s Camera=%s"),
 			*FaceTarget.ToString(), *CameraLocation.ToString());
+		UE_LOG(LogTemp, Warning,
+			TEXT("[SCENE_CAMERA][AFTER_COMMON] scene=%s actor_scale=%s camera_distance=%.2fcm fov=%.2f"),
+			*GetConversationLocationTagStem(Location), *CharacterActor->GetActorScale3D().ToString(),
+			FVector::Distance(FaceTarget, CameraLocation), CanonicalConversationCameraFOVDegrees);
 	}
 	if (VehiclePawn)
 	{
@@ -3410,8 +5236,20 @@ void ARealtimeTestActor::TryMoveToConversationLocation(EConversationLocation Loc
 			PC->SetViewTargetWithBlend(IntroFaceCamera, 0.0f);
 		}
 	}
+	GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateUObject(
+		this, &ARealtimeTestActor::LogConversationCameraDiagnostics, Location));
 	bIsInRoomMode = true;
 	CurrentConversationLocation = Location;
+	if (Location == EConversationLocation::Classroom)
+	{
+		FTimerHandle ClassroomLightingRefreshTimer;
+		GetWorldTimerManager().SetTimer(
+			ClassroomLightingRefreshTimer,
+			this,
+			&ARealtimeTestActor::RefreshClassroomJenniferLightingAfterMove,
+			0.25f,
+			false);
+	}
 	SetPaytonFillLightsEnabled(false);
 
 	UE_LOG(LogTemp, Log, TEXT("RealtimeTestActor: 会話により%sへ移動しました"),

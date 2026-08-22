@@ -1,1 +1,2 @@
 Content/Meshy_Crimson_Gaze_Jaw/SK_Crimson_Gaze_Jaw.uasset filter=lfs diff=lfs merge=lfs -text
+Content/Meshy_Crimson_Gaze_HeadRig/*.uasset filter=lfs diff=lfs merge=lfs -text
